@@ -1,0 +1,51 @@
+appId: com.dragonplus.dsh-web
+productName: DSH Web
+copyright: MIT
+
+directories:
+  output: release
+  buildResources: assets
+
+files:
+  - src/main/**
+  - package.json
+
+asar: true
+
+# 公共资源：pnpm（跨平台单包）
+extraResources:
+  - from: vendor/pnpm
+    to: vendor/pnpm
+
+mac:
+  category: public.app-category.developer-tools
+  # 本地自用：跳过 Apple 开发者签名（如需分发请配置 CSC_LINK）
+  identity: null
+  icon: assets/icon.png
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  extraResources:
+    - from: vendor/node-darwin-arm64
+      to: vendor/node-darwin-arm64
+
+win:
+  # 在 macOS 上交叉打包；未签名，首次运行会有 SmartScreen 提示
+  icon: assets/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+  extraResources:
+    - from: vendor/node-win32-x64
+      to: vendor/node-win32-x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: DSH Web-Setup-${version}-x64.exe
+
+npmRebuild: false

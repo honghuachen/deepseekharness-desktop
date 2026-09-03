@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px 18px 76px;
+    font: 13px/1.6 -apple-system, "PingFang SC", sans-serif;
+    background: #f5f6f8; color: #1d2129;
+    user-select: none;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #17181a; color: #d6d9dd; } .card{background:#1f2124!important} }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  .sub { font-size: 12px; opacity: .65; margin-bottom: 14px; }
+  .card {
+    background: #fff; border-radius: 10px; padding: 10px 14px; margin-bottom: 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  h2 {
+    font-size: 13px; margin: 4px 0 2px;
+    display:flex; align-items:center; gap:8px; flex-wrap: wrap;
+  }
+  .meta { font-size: 11px; opacity:.55; font-weight: normal; }
+  .profile-actions { margin-left: auto; display:flex; gap:6px; }
+  .profile-actions .mini {
+    font: 11px -apple-system, sans-serif; padding: 3px 9px; border-radius: 5px;
+    border: 1px solid rgba(128,128,128,.3); background: transparent; color: inherit; cursor: pointer;
+  }
+  .profile-actions .mini:disabled { opacity:.4; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  td { padding: 5px 6px; border-top: 1px solid rgba(128,128,128,.15); vertical-align: middle; }
+  td.name { font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-all; }
+  td.range { opacity:.6; white-space: nowrap; font-size:12px; }
+  td.refs { white-space: nowrap; font-size: 11px; }
+  td.upd { white-space: nowrap; font-size: 11px; width: 1%; }
+  .tag { display:inline-block; padding:0 7px; border-radius:9px; font-size:11px; margin-right:4px; }
+  .tag.official { background: rgba(77,107,254,.14); color:#3b62f6; }
+  .tag.third { background: rgba(255,159,10,.16); color:#c77700; }
+  @media (prefers-color-scheme: dark){ .tag.official{color:#7e97ff} .tag.third{color:#ffb84d} }
+  .tag.ref { background: rgba(128,128,128,.14); color: inherit; opacity:.75; }
+  .tag.update { background: rgba(229,72,77,.16); color:#d6313a; }
+  @media (prefers-color-scheme: dark){ .tag.update{color:#ff7375} }
+  .tag.current { background: rgba(47,158,68,.16); color:#2f9e44; }
+  @media (prefers-color-scheme: dark){ .tag.current{color:#51cd6d} }
+  .tag.unknown { background: rgba(128,128,128,.18); color: inherit; opacity:.7; }
+  input[type=checkbox]{ width:15px; height:15px; accent-color:#4d6bfe; cursor:pointer; }
+  input[type=checkbox]:disabled{ cursor:not-allowed; opacity:.35; }
+  tr.info td { opacity:.55; }
+  .empty { padding: 26px 0 18px; text-align:center; opacity:.55; }
+  footer {
+    position: fixed; left:0; right:0; bottom:0; padding: 12px 18px;
+    background: rgba(127,127,127,.08); backdrop-filter: blur(8px);
+    display:flex; align-items:center; gap:12px;
+  }
+  #summary { flex:1; font-size:12px; }
+  button {
+    font: 13px -apple-system, sans-serif; padding: 7px 16px; border-radius: 7px;
+    border: 1px solid rgba(128,128,128,.35); background: transparent; color: inherit; cursor:pointer;
+  }
+  button.primary { background:#4d6bfe; border-color:#4d6bfe; color:#fff; }
+  button.primary:disabled { opacity:.45; cursor:not-allowed; }
+  button.danger { background:#e5484d; border-color:#e5484d; color:#fff; }
+  .btn-update {
+    font: 11px -apple-system, sans-serif; padding: 3px 10px; border-radius: 5px;
+    border: 1px solid rgba(229,72,77,.5); background: rgba(229,72,77,.12); color:#d6313a; cursor:pointer;
+  }
+  .btn-update:hover { background: rgba(229,72,77,.2); }
+  .btn-update:disabled { opacity:.5; cursor: not-allowed; }
+  @media (prefers-color-scheme: dark) {
+    .btn-update { color:#ff7375; border-color: rgba(255,115,117,.5); background: rgba(255,115,117,.12); }
+    .btn-update:hover { background: rgba(255,115,117,.2); }
+  }
+  .report { margin-top: 10px; font-size: 12px; }
+  .report .ok { color: #2f9e44; } .report .err { color: #e5484d; }
+  .report .neutral { opacity: .75; }
+  .badge-update {
+    display: inline-block; min-width: 18px; height: 18px; line-height: 18px;
+    padding: 0 6px; border-radius: 9px; font-size: 11px; font-weight: 600;
+    background: #e5484d; color: #fff; text-align:center;
+  }
+  .spinner {
+    display:inline-block; width:11px; height:11px;
+    border: 2px solid rgba(128,128,128,.35); border-top-color: #4d6bfe;
+    border-radius:50%; animation: spin .7s linear infinite; vertical-align: -1px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .banner-update {
+    display:flex; align-items:center; gap:10px; flex-wrap: wrap;
+    background: rgba(229,72,77,.12); border: 1px solid rgba(229,72,77,.4);
+    border-radius: 10px; padding: 10px 14px; margin-bottom: 14px;
+    font-size: 13px;
+  }
+  .banner-update .strong { font-weight: 600; color:#d6313a; }
+  @media (prefers-color-scheme: dark) { .banner-update .strong { color:#ff7375; } }
+  .banner-update .profiles { font-size: 12px; opacity:.8; flex:1; min-width: 200px; }
+  .banner-update button.all-update {
+    font: 12px -apple-system, sans-serif; padding: 5px 14px; border-radius: 6px;
+    border: 1px solid #e5484d; background:#e5484d; color:#fff; cursor:pointer;
+  }
+  .banner-update button.all-update:disabled { opacity:.5; cursor:not-allowed; }
+  .banner-update .checked-at { font-size: 11px; opacity:.6; }
+</style>
+</head>
+<body>
+  <h1>第三方插件管理</h1>
+  <div class="sub">扫描 ~/.dsh/profiles 下各 profile。官方包（@deepseek-ai/*）不可移除；带 <span class="tag ref">bundle</span><span class="tag ref">补丁层</span> 标记表示该插件在对应位置被引用，移除时会一并清理。带 <span class="tag update">有新版</span> 的第三方插件可点击「更新」按钮升级。</div>
+  <div id="content">加载中…</div>
+  <footer>
+    <span id="summary"></span>
+    <button id="cancelBtn" style="display:none">取消</button>
+    <button id="confirmBtn" class="danger" style="display:none">确认移除</button>
+    <button id="removeBtn" class="primary" disabled>移除所选</button>
+    <button id="checkAllBtn">检查全部更新</button>
+    <button id="refreshBtn">刷新</button>
+  </footer>
+
+<script>
+let DATA = [];
+const selected = new Map(); // profile -> Set(names)
+// 更新状态缓存：profile -> Map<name, {latest, status, loading, error, from, to}>
+const updateState = new Map();
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function refsTags(item) {
+  const t = [];
+  if (item.inBundle) t.push('<span class="tag ref">bundle</span>');
+  if (item.inPatch) t.push('<span class="tag ref">补丁层</span>');
+  return t.join('') || '<span style="opacity:.4">—</span>';
+}
+
+function statusTagFor(item, p) {
+  const st = updateState.get(p)?.get(item.rawName || item.name);
+  if (!st) return '<span class="tag unknown" title="未检查">未检查</span>';
+  if (st.loading) return '<span class="spinner" title="检查中…"></span>';
+  if (st.status === 'outdated') {
+    return `<span class="tag update" title="当前 ${esc(st.from || item.range)}">有新版 ${esc(st.latest || '?')}</span>`;
+  }
+  if (st.status === 'current') {
+    return `<span class="tag current" title="最新版本 ${esc(st.latest || '')}">已是最新</span>`;
+  }
+  if (st.status === 'unknown') {
+    return `<span class="tag unknown" title="registry 不可达或依赖为协议型">未知</span>`;
+  }
+  if (st.status === 'updated') {
+    return `<span class="tag current" title="已升级到 ${esc(st.to || '')}">已更新 ${esc(st.to || '')}</span>`;
+  }
+  if (st.status === 'failed') {
+    return `<span class="tag update" title="${esc(st.error || '更新失败')}">更新失败</span>`;
+  }
+  return '<span class="tag unknown">未检查</span>';
+}
+
+function updateBtnFor(item, p) {
+  const st = updateState.get(p)?.get(item.rawName || item.name);
+  if (!st) return '<button class="btn-update" data-act="upd-one" data-profile="' + esc(p) + '" data-key="' + esc(item.rawName || item.name) + '">更新</button>';
+  if (st.loading) return '<button class="btn-update" disabled>更新中…</button>';
+  if (st.status === 'outdated') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="${esc(st.latest || 'latest')}">更新到 ${esc(st.latest || 'latest')}</button>`;
+  if (st.status === 'failed') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">重试</button>`;
+  return '';
+}
+
+function renderRow(profile, item) {
+  const removable = !item.official;
+  const key = item.rawName || item.name;
+  if (!removable && item.insertOnly) {
+    return `<tr class="info"><td></td><td class="name">${esc(item.name)}</td>
+      <td class="range">${esc(item.range)}</td>
+      <td class="refs"><span class="tag official">官方配置</span>${refsTags(item)}</td>
+      <td class="upd"></td></tr>`;
+  }
+  const checked = selected.get(profile)?.has(key) ? 'checked' : '';
+  const updCell = removable ? `${statusTagFor(item, profile)} ${updateBtnFor(item, profile)}` : '';
+  return `<tr>
+    <td style="width:26px">${removable ? `<input type="checkbox" data-profile="${esc(profile)}" data-key="${esc(key)}" ${checked} onchange="onToggle(this)">` : ''}</td>
+    <td class="name">${esc(item.name)}</td>
+    <td class="range">${esc(item.range)}</td>
+    <td class="refs">${item.official ? '<span class="tag official">官方</span>' : '<span class="tag third">第三方</span>'}${refsTags(item)}</td>
+    <td class="upd">${updCell}</td>
+  </tr>`;
+}
+
+function renderSection(p) {
+  const sel = selected.get(p.profile);
+  const size = sel ? sel.size : 0;
+  const rows = p.items.map((i) => renderRow(p.profile, i)).join('');
+  const empty = p.items.length === 0 ? '<tr class="info"><td colspan="5" style="text-align:center;padding:16px 0">空 — 仅含默认结构</td></tr>' : '';
+  const outdatedCount = profileOutdatedCount(p.profile);
+  const updAllBtn = outdatedCount > 0
+    ? `<button class="mini" data-act="upd-all" data-profile="${esc(p.profile)}" title="将全部 ${outdatedCount} 个第三方插件更新到最新版">更新全部（${outdatedCount}）</button>`
+    : '';
+  return `<div class="card">
+    <h2>${esc(p.profile)} <span class="meta">${p.hasNodeModules ? '含 node_modules' : '无 node_modules'}${size ? ` · 已选 ${size} 项` : ''}</span>
+      <span class="profile-actions">
+        ${updAllBtn}
+        <button class="mini" data-act="check-one" data-profile="${esc(p.profile)}">检查此 profile</button>
+      </span>
+    </h2>
+    <table><tbody>${rows}${empty}</tbody></table>
+  </div>`;
+}
+
+function profileOutdatedCount(profile) {
+  let n = 0;
+  const m = updateState.get(profile);
+  if (m) for (const s of m.values()) if (s.status === 'outdated') n++;
+  return n;
+}
+
+function totalUpdateCount() {
+  let n = 0;
+  for (const m of updateState.values()) for (const s of m.values()) if (s.status === 'outdated') n++;
+  return n;
+}
+
+function render() {
+  if (!DATA.length) { $('#content').innerHTML = '<div class="empty">未找到任何 profile</div>'; updateBar(); return; }
+  const hasThird = DATA.some((p) => p.items.some((i) => !i.official));
+  $('#content').innerHTML = updateBanner() + DATA.map(renderSection).join('') +
+    (hasThird ? '' : '<div class="empty">🎉 未发现第三方插件，全部为官方组件</div>');
+  updateBar();
+}
+
+/** 顶部「有新版」提醒横幅：列出各 profile 的可更新数 + 一键全部更新 */
+function updateBanner() {
+  const per = new Map(); // profile -> count
+  for (const [p, m] of updateState) {
+    let n = 0;
+    for (const s of m.values()) if (s.status === 'outdated') n++;
+    if (n) per.set(p, n);
+  }
+  if (per.size === 0) return '';
+  const profText = [...per.entries()]
+    .map(([p, n]) => `${esc(p)} <b>${n}</b>`)
+    .join('、');
+  return `<div class="banner-update">
+    <span class="strong">🔔 发现 ${totalUpdateCount()} 个插件可更新</span>
+    <span class="profiles">${profText}</span>
+    <button class="all-update" data-act="upd-all-global">全部更新</button>
+  </div>`;
+}
+
+function updateBar() {
+  let n = 0;
+  for (const s of selected.values()) n += s.size;
+  $('#removeBtn').disabled = n === 0 || $('#confirmBtn').style.display !== 'none';
+  const upd = totalUpdateCount();
+  const sumParts = [];
+  if (n) sumParts.push(`已选 ${n} 个插件`);
+  if (upd) sumParts.push(`<span class="badge-update" title="共 ${upd} 个第三方插件可更新">${upd}</span> 个可更新`);
+  $('#summary').innerHTML = sumParts.join(' · ');
+}
+
+window.onToggle = (el) => {
+  const p = el.dataset.profile, k = el.dataset.key;
+  if (!selected.has(p)) selected.set(p, new Set());
+  const set = selected.get(p);
+  el.checked ? set.add(k) : set.delete(k);
+  updateBar();
+};
+
+function enterConfirm() {
+  const names = [];
+  for (const [p, s] of selected) for (const k of s) names.push(`${p} · ${k}`);
+  $('#summary').textContent = `将移除：${names.join('、')}（原文件自动备份）`;
+  $('#removeBtn').style.display = 'none';
+  $('#confirmBtn').style.display = '';
+  $('#cancelBtn').style.display = '';
+  updateBar();
+}
+function exitConfirm() {
+  $('#removeBtn').style.display = '';
+  $('#confirmBtn').style.display = 'none';
+  $('#cancelBtn').style.display = 'none';
+  $('#summary').textContent = '';
+  render();
+}
+
+$('#removeBtn').onclick = enterConfirm;
+$('#cancelBtn').onclick = exitConfirm;
+$('#refreshBtn').onclick = async () => {
+  const res = await window.pluginAPI.list();
+  DATA = res.profiles ?? [];
+  render();
+  await checkUpdates(null); // 「刷新」应实际重新检查，而非只是重放上次缓存的检查结果
+};
+
+$('#confirmBtn').onclick = async () => {
+  $('#confirmBtn').disabled = true;
+  const selections = {};
+  for (const [p, s] of selected) if (s.size) selections[p] = [...s];
+  try {
+    const res = await window.pluginAPI.remove(selections);
+    showReport(res.report ?? []);
+    selected.clear();
+    DATA = res.profiles ?? [];
+    // 移除后清空相关 profile 的更新状态
+    for (const p of Object.keys(selections)) updateState.delete(p);
+  } catch (err) {
+    $('#summary').textContent = `失败：${err.message}`;
+  }
+  $('#confirmBtn').disabled = false;
+  exitConfirm();
+};
+
+$('#checkAllBtn').onclick = async () => {
+  await checkUpdates(null);
+};
+
+// 事件代理：行内「更新」按钮 + 卡片标题「检查此 profile」+「更新全部」
+document.addEventListener('click', async (ev) => {
+  const t = ev.target.closest('[data-act]');
+  if (!t) return;
+  if (t.dataset.act === 'upd-one') {
+    const p = t.dataset.profile, k = t.dataset.key, target = t.dataset.target || 'latest';
+    await updateOne(p, k, target);
+  } else if (t.dataset.act === 'check-one') {
+    await checkUpdates([t.dataset.profile]);
+  } else if (t.dataset.act === 'upd-all') {
+    await updateAll(t.dataset.profile);
+  } else if (t.dataset.act === 'upd-all-global') {
+    await updateAllGlobal();
+  }
+});
+
+function getOrCreateMap(profile) {
+  if (!updateState.has(profile)) updateState.set(profile, new Map());
+  return updateState.get(profile);
+}
+
+let autoChecking = false; // 打开窗口时的自动检查，避免与手动检查并发
+let autoChecked = false;  // 本次会话是否已自动检查过
+
+async function checkUpdates(profiles) {
+  $('#checkAllBtn').disabled = true;
+  // 标记 loading
+  const targets = profiles ?? DATA.map((p) => p.profile);
+  for (const p of targets) {
+    const m = getOrCreateMap(p);
+    for (const item of (DATA.find((x) => x.profile === p)?.items ?? [])) {
+      if (item.official) continue;
+      const k = item.rawName || item.name;
+      const cur = m.get(k);
+      if (cur?.loading) continue;
+      m.set(k, { ...(cur || {}), loading: true, error: null });
+    }
+  }
+  render();
+  try {
+    const res = await window.pluginAPI.checkUpdates(profiles);
+    const updates = res.updates ?? {};
+    for (const [p, list] of Object.entries(updates)) {
+      if (Array.isArray(list)) {
+        const m = getOrCreateMap(p);
+        for (const u of list) {
+          m.set(u.name, {
+            loading: false,
+            latest: u.latest,
+            from: u.range,
+            status: u.status,
+            error: null,
+          });
+        }
+      } else if (list?.error) {
+        const m = getOrCreateMap(p);
+        for (const k of m.keys()) {
+          const cur = m.get(k);
+          m.set(k, { ...cur, loading: false, status: 'unknown', error: list.error });
+        }
+      }
+    }
+  } catch (err) {
+    showReport([{ error: '检查更新失败：' + err.message }]);
+  }
+  $('#checkAllBtn').disabled = false;
+  render();
+}
+
+// 打开界面即自动检查全部更新，直接显示「有新版」条目；
+// 自动检查期间把 summary 改为检查进度提示。
+async function autoCheck() {
+  if (autoChecked || autoChecking) return;
+  autoChecking = true;
+  $('#summary').innerHTML = '<span class="spinner"></span> 正在检查更新…';
+  try {
+    await checkUpdates(null);
+  } finally {
+    autoChecking = false;
+    autoChecked = true;
+    updateBar();
+  }
+}
+
+async function updateOne(profile, name, target) {
+  const m = getOrCreateMap(profile);
+  const cur = m.get(name) || {};
+  m.set(name, { ...cur, loading: true, error: null });
+  render();
+  try {
+    const res = await window.pluginAPI.update(profile, name, target);
+    if (res.ok) {
+      m.set(name, { loading: false, status: 'updated', from: res.from, to: res.to, error: null });
+      if (Array.isArray(res.profiles)) DATA = res.profiles;
+    } else {
+      m.set(name, { ...(m.get(name) || {}), loading: false, status: 'failed', error: res.error || '更新失败' });
+    }
+    showUpdateResult(profile, res);
+  } catch (err) {
+    m.set(name, { ...(m.get(name) || {}), loading: false, status: 'failed', error: String(err.message || err) });
+    showReport([{ error: `${profile} · ${name}：${err.message}` }]);
+  }
+  render();
+}
+
+/** 一键把全部 profile 的可更新插件升级到最新版（逐 profile 串行） */
+async function updateAllGlobal() {
+  const profiles = [];
+  for (const [p, m] of updateState) {
+    let n = 0;
+    for (const s of m.values()) if (s.status === 'outdated') n++;
+    if (n) profiles.push(p);
+  }
+  if (profiles.length === 0) return;
+  const btn = document.querySelector('.banner-update .all-update');
+  if (btn) btn.disabled = true;
+  for (const p of profiles) await updateAll(p);
+  if (btn) btn.disabled = false;
+  render();
+}
+
+/** 一键把某 profile 的全部「有新版」插件升级到最新版（串行） */
+async function updateAll(profile) {
+  const m = getOrCreateMap(profile);
+  const names = [];
+  for (const [k, s] of m) if (s.status === 'outdated') names.push(k);
+  if (names.length === 0) return;
+  for (const k of names) m.set(k, { ...m.get(k), loading: true, error: null });
+  render();
+  const results = [];
+  try {
+    const res = await window.pluginAPI.updateAll(profile, names);
+    const report = res.report ?? [];
+    for (const r of report) {
+      results.push(r);
+      if (r.ok) {
+        m.set(r.name, { loading: false, status: 'updated', from: r.from, to: r.to, error: null });
+      } else {
+        m.set(r.name, { ...(m.get(r.name) || {}), loading: false, status: 'failed', error: r.error || '更新失败' });
+      }
+    }
+    if (Array.isArray(res.profiles)) DATA = res.profiles;
+  } catch (err) {
+    showReport([{ error: `${profile} · 更新全部失败：${err.message}` }]);
+  }
+  for (const r of results) showUpdateResult(profile, r);
+  render();
+}
+
+function showUpdateResult(profile, res) {
+  const lines = [];
+  if (res.ok) {
+    lines.push(`<div class="ok">✓ ${esc(profile)} · ${esc(res.name)}：${esc(res.from)} → ${esc(res.to || res.to)}</div>`);
+  } else {
+    lines.push(`<div class="err">✗ ${esc(profile)} · ${esc(res.name || '?')}：${esc(res.error || '失败')}</div>`);
+  }
+  const box = document.createElement('div');
+  box.className = 'report card';
+  box.innerHTML = lines.join('');
+  box.onclick = () => box.remove();
+  $('#content').prepend(box);
+}
+
+function showReport(report) {
+  if (!report.length) return;
+  const lines = report.map((r) =>
+    r.error
+      ? `<div class="err">✗ ${esc(r.profile || '')}：${esc(r.error)}</div>`
+      : r.removed
+        ? `<div class="ok">✓ ${esc(r.profile)}：已移除 ${r.removed.length} 项</div>`
+        : `<div class="neutral">${esc(r.profile || '')}</div>`
+  );
+  const box = document.createElement('div');
+  box.className = 'report card';
+  box.innerHTML = lines.join('');
+  box.onclick = () => box.remove();
+  $('#content').prepend(box);
+}
+
+/** 用主进程持久化的上次检查结果填充 updateState（立即展示，无需等网络） */
+function applyUpdateCache(cache) {
+  if (!cache || typeof cache.profiles !== 'object') return;
+  for (const [p, list] of Object.entries(cache.profiles)) {
+    if (!Array.isArray(list)) continue;
+    const m = getOrCreateMap(p);
+    for (const u of list) {
+      if (u && u.name) {
+        m.set(u.name, {
+          loading: false,
+          latest: u.latest,
+          from: u.range,
+          status: u.status,
+          error: null,
+        });
+      }
+    }
+  }
+}
+
+async function load() {
+  const res = await window.pluginAPI.list();
+  DATA = res.profiles ?? [];
+  // 先用缓存立即展示更新条目，再后台自动刷新（新打开时总有提醒，不依赖网络等待）
+  applyUpdateCache(res.updateCache);
+  render();
+  autoCheck();
+}
+load();
+</script>
+</body>
+</html>

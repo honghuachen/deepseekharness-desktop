@@ -1,0 +1,21 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4D6BFE"/>
+      <stop offset="100%" stop-color="#7C3AED"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS 图标圆角矩形（留出系统边距） -->
+  <rect x="112" y="112" width="800" height="800" rx="180" fill="url(#bg)"/>
+  <!-- 终端窗口意象 -->
+  <rect x="232" y="312" width="560" height="400" rx="48" fill="#ffffff" opacity="0.14"/>
+  <rect x="232" y="312" width="560" height="88" rx="48" fill="#ffffff" opacity="0.18"/>
+  <rect x="232" y="360" width="560" height="40" fill="#ffffff" opacity="0.18"/>
+  <circle cx="292" cy="356" r="16" fill="#FF5F57"/>
+  <circle cx="344" cy="356" r="16" fill="#FEBC2E"/>
+  <circle cx="396" cy="356" r="16" fill="#28C840"/>
+  <!-- 提示符 -->
+  <path d="M300 520 L380 584 L300 648" stroke="#ffffff" stroke-width="44"
+        stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <rect x="420" y="620" width="220" height="44" rx="22" fill="#ffffff"/>
+</svg>

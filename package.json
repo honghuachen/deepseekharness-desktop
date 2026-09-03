@@ -1,0 +1,23 @@
+{
+  "name": "deepseek-harness-web",
+  "productName": "DSH Web",
+  "version": "1.4.1",
+  "description": "窗口化承载官方 DeepSeek Harness Web 壳的桌面容器，每次启动自动检测并更新官方运行时",
+  "license": "MIT",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/main/main.js",
+  "author": "dragonplus",
+  "scripts": {
+    "start": "electron .",
+    "fetch-tools": "node scripts/fetch-tools.mjs",
+    "test:e2e": "node scripts/e2e-update-test.mjs",
+    "test:plugin-update": "node scripts/test-plugin-update.mjs",
+    "dist:dir": "npm run fetch-tools && electron-builder --dir -m -w",
+    "dist": "npm run fetch-tools && electron-builder -m -w"
+  },
+  "devDependencies": {
+    "electron": "44.0.0",
+    "electron-builder": "26.15.3"
+  }
+}
