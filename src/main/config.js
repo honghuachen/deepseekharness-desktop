@@ -31,6 +31,8 @@ const DEFAULT_SETTINGS = {
   dshHome: '',
   // 会话任务完成后在 Dock 图标上显示完成数量角标（聚焦窗口即清零）
   taskBadge: true,
+  // 内核版本固定：空 = 跟随 npm latest 自动更新；非空 = 固定到具体版本号，启动时不再比较 latest
+  pinnedKernelVersion: '',
 };
 
 /**

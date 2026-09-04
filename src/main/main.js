@@ -20,12 +20,16 @@ const { promisify } = require('node:util');
 const { makePaths, loadSettings, saveSettings, DEFAULT_PORT } = require('./config');
 const { compareVersions } = require('./semver');
 const { createUpdater } = require('./updater');
+const { createKernelSwitcher } = require('./kernel-switch');
+const { fetchAllKernelVersions } = require('./kernel-versions');
+const { checkShellUpdate } = require('./shell-update');
 const { createRunner } = require('./runner');
 const { createBadgeWatcher } = require('./badge');
 const { createLogger } = require('./logger');
 const { createStatusWindow } = require('./status-window');
 const { openPluginManager } = require('./plugin-manager');
 const { openTokenUsageWindow } = require('./token-usage/window');
+const { openUpdateWindow: openUpdateWindowImpl } = require('./update-window');
 
 const execFileP = promisify(execFile);
 
@@ -44,6 +48,7 @@ let paths;
 let logger;
 let settings;
 let updater;
+let kernelSwitcher;
 let runner;
 let statusWin;
 let mainWindow = null;
@@ -359,27 +364,39 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
   }
 
   updater = createUpdater({ nodeBin, pnpmCjs: pnpmCjsPath(), paths, log: logLine });
+  kernelSwitcher = createKernelSwitcher({ updater, settings, paths, saveSettings, log: logLine });
   runner = createRunner({ nodeBin, paths, log: logLine });
 
-  const latest = settings.autoCheckUpdates ? await updater.getLatestVersion() : null;
-  let installed = await updater.getCurrentVersion();
-
-  if (latest && compareVersions(latest, installed ?? '0.0.0') > 0) {
-    statusText(
-      installed
-        ? `检测到新版本 ${latest}（当前 ${installed}），开始更新…`
-        : `首次运行：正在安装官方运行时 ${latest}…`,
-    );
-    await updater.install(latest, statusText);
-    await updater.activate(latest);
-    installed = latest;
-    await updater.prune(2, latest);
-  } else if (installed) {
-    statusText(latest ? `已是最新版本 ${installed}` : `离线：使用已装版本 ${installed}`);
+  let installed;
+  if (settings.pinnedKernelVersion) {
+    // 用户已手动固定版本：尊重这个选择，不查询/比较 latest（除非用户在更新窗口里主动恢复自动跟随）
+    const pinned = settings.pinnedKernelVersion;
+    statusText(`使用固定内核版本 ${pinned}…`);
+    await updater.install(pinned, statusText); // install() 本身已幂等，已装过则跳过下载
+    await updater.activate(pinned);
+    installed = pinned;
+    await updater.prune(2, [installed]);
   } else {
-    throw new Error(
-      '本地没有任何官方运行时，且无法连接 npm registry。\n请联网后重试。',
-    );
+    const latest = settings.autoCheckUpdates ? await updater.getLatestVersion() : null;
+    installed = await updater.getCurrentVersion();
+
+    if (latest && compareVersions(latest, installed ?? '0.0.0') > 0) {
+      statusText(
+        installed
+          ? `检测到新版本 ${latest}（当前 ${installed}），开始更新…`
+          : `首次运行：正在安装官方运行时 ${latest}…`,
+      );
+      await updater.install(latest, statusText);
+      await updater.activate(latest);
+      installed = latest;
+      await updater.prune(2, [installed]);
+    } else if (installed) {
+      statusText(latest ? `已是最新版本 ${installed}` : `离线：使用已装版本 ${installed}`);
+    } else {
+      throw new Error(
+        '本地没有任何官方运行时，且无法连接 npm registry。\n请联网后重试。',
+      );
+    }
   }
 
   activeVersion = installed;
@@ -401,6 +418,14 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
     setTimeout(() => {
       try {
         openManager();
+      } catch {}
+    }, 3000);
+  }
+  // 开发诊断：DSH_WEB_DEV_UPDATE=1 时自动打开检查更新窗口
+  if (process.env.DSH_WEB_DEV_UPDATE) {
+    setTimeout(() => {
+      try {
+        openUpdateWindow();
       } catch {}
     }, 3000);
   }
@@ -493,45 +518,66 @@ function openManager() {
   }
 }
 
-/** 菜单触发的手动检查更新：装好后询问是否立即应用 */
-async function manualUpdateCheck() {
+/** 更新窗口：容器(壳)当前版本 + GitHub Releases 最新版检测（检测失败/无 Release 返回 latest: null） */
+async function getShellInfo() {
+  const latest = await checkShellUpdate(app.getVersion(), { log: logLine });
+  return { currentVersion: app.getVersion(), latest };
+}
+
+/** 更新窗口：内核当前激活/固定状态 + npm registry 全部已发布版本（拉取失败返回 entries: null） */
+async function getKernelInfo() {
+  const versions = await fetchAllKernelVersions({ log: logLine });
+  return {
+    activeVersion,
+    pinnedVersion: settings.pinnedKernelVersion || '',
+    latestTag: versions?.latestTag || null,
+    entries: versions?.entries || null,
+  };
+}
+
+/**
+ * 切换内核到指定版本，供"启动时激活固定版本"（bootstrap 内联处理）和
+ * "更新窗口里手动切换"共用。任一步失败都不推进 activeVersion/pinnedKernelVersion，
+ * 并尽量把之前的服务重新拉起来，不留半成品状态。
+ */
+async function switchKernelVersion(version, { pin, onLine } = {}) {
+  const dshHome = resolveDshHome();
+  const wasRunning = runner?.isRunning();
+  const previousVersion = activeVersion;
+  if (wasRunning) await runner.stop();
+
   try {
-    const latest = await updater.getLatestVersion();
-    if (!latest) {
-      dialog.showMessageBox({ type: 'info', message: '无法连接 npm registry，请检查网络。' });
-      return;
-    }
-    const current = await updater.getCurrentVersion();
-    if (compareVersions(latest, current) <= 0) {
-      dialog.showMessageBox({ type: 'info', message: `当前已是最新版本（${current}）。` });
-      return;
-    }
-    statusWin = createStatusWindow();
-    await updater.install(latest, statusText);
-    const { response } = await dialog.showMessageBox({
-      type: 'question',
-      message: `已下载 ${latest}。立即重启服务应用更新吗？`,
-      detail: `当前版本 ${current}。选择“稍后”则下次启动自动应用。`,
-      buttons: ['立即应用', '稍后'],
-      defaultId: 0,
-    });
-    if (response === 0) {
-      await runner.stop();
-      await updater.activate(latest);
-      activeVersion = latest;
-      await updater.prune(2, latest);
-      const { url } = await runner.start(latest, settings.port);
-      if (mainWindow) mainWindow.loadURL(url);
-      else createMainWindow(url);
-      statusWin.close();
-    }
+    await kernelSwitcher.switchKernelVersion(version, { pin, onLine });
   } catch (err) {
-    logLine(`手动检查更新失败：${err.stack || err}`);
-    dialog.showMessageBox({
-      type: 'error',
-      message: '检查更新失败',
-      detail: String(err.message || err),
+    if (wasRunning && previousVersion) {
+      await runner
+        .start(previousVersion, settings.port, { envOverride: { DSH_HOME: dshHome } })
+        .catch(() => {});
+    }
+    throw err;
+  }
+
+  activeVersion = version;
+  await updater.prune(2, [activeVersion, settings.pinnedKernelVersion].filter(Boolean));
+  const { url } = await runner.start(activeVersion, settings.port, {
+    envOverride: { DSH_HOME: dshHome },
+  });
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(url).catch(() => {});
+  return url;
+}
+
+/** 菜单动作：打开检查更新窗口（容器+内核） */
+function openUpdateWindow() {
+  try {
+    openUpdateWindowImpl({
+      getShellInfo,
+      getKernelInfo,
+      switchKernelVersion,
+      openExternal: (url) => shell.openExternal(url),
+      log: logLine,
     });
+  } catch (err) {
+    dialog.showMessageBox({ type: 'error', message: '无法打开更新窗口', detail: String(err.message || err) });
   }
 }
 
@@ -547,7 +593,7 @@ function buildMenu() {
         {
           label: '检查更新…',
           accelerator: 'CmdOrCtrl+U',
-          click: () => manualUpdateCheck(),
+          click: () => openUpdateWindow(),
         },
         { type: 'separator' },
         {

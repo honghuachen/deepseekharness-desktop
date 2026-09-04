@@ -168,8 +168,11 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
     await fsPromises.rename(tmp, file);
   }
 
-  /** 只保留最近 keep 个版本（含当前激活），清理更旧的以控制磁盘占用 */
-  async function prune(keep = 2, activeVersion = null) {
+  /**
+   * 只保留最近 keep 个版本（含 protect 指定的版本，如当前激活版本、用户固定版本），
+   * 清理更旧的以控制磁盘占用。protect 可传单个版本号或数组。
+   */
+  async function prune(keep = 2, protect = null) {
     const { compareVersions } = require('./semver');
     let entries = [];
     try {
@@ -180,7 +183,8 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
     const sorted = entries
       .filter((name) => name.startsWith('v'))
       .sort((a, b) => compareVersions(b.slice(1), a.slice(1)));
-    const protectedNames = new Set([`v${activeVersion}`].filter(Boolean));
+    const protectList = Array.isArray(protect) ? protect : [protect];
+    const protectedNames = new Set(protectList.filter(Boolean).map((v) => `v${v}`));
     for (const name of sorted.slice(keep)) {
       if (protectedNames.has(name)) continue;
       const dir = path.join(paths.versionsDir, name);

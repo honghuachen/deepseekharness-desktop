@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px 18px 20px;
+    font: 13px/1.6 -apple-system, "PingFang SC", sans-serif;
+    background: #f5f6f8; color: #1d2129;
+    user-select: none;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #17181a; color: #d6d9dd; } .card{background:#1f2124!important} }
+  h1 { font-size: 15px; margin: 0 0 4px; display:flex; align-items:center; gap: 10px; }
+  h1 .refresh {
+    margin-left: auto; font: 12px -apple-system, sans-serif; padding: 4px 12px; border-radius: 6px;
+    border: 1px solid rgba(128,128,128,.35); background: transparent; color: inherit; cursor: pointer;
+  }
+  h1 .refresh:disabled { opacity:.5; cursor: not-allowed; }
+  .sub { font-size: 12px; opacity: .6; margin-bottom: 14px; }
+  .card {
+    background: #fff; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  .card h2 { font-size: 13px; margin: 0 0 10px; display:flex; align-items:center; gap:8px; }
+  .row { display:flex; align-items:center; gap: 10px; flex-wrap: wrap; }
+  .muted { opacity:.6; }
+  .tag { display:inline-block; padding:0 8px; border-radius:9px; font-size:11px; line-height:18px; }
+  .tag.rc { background: rgba(255,159,10,.16); color:#c77700; }
+  .tag.alpha { background: rgba(128,128,128,.18); color: inherit; opacity:.8; }
+  .tag.stable { background: rgba(47,158,68,.16); color:#2f9e44; }
+  .tag.recommended { background: rgba(77,107,254,.14); color:#3b62f6; }
+  .tag.pinned { background: rgba(255,159,10,.16); color:#c77700; }
+  @media (prefers-color-scheme: dark) {
+    .tag.rc { color:#ffb84d; }
+    .tag.stable { color:#51cd6d; }
+    .tag.recommended { color:#7e97ff; }
+    .tag.pinned { color:#ffb84d; }
+  }
+  button {
+    font: 12px -apple-system, sans-serif; padding: 5px 14px; border-radius: 6px;
+    border: 1px solid rgba(128,128,128,.35); background: transparent; color: inherit; cursor:pointer;
+  }
+  button.primary { background:#4d6bfe; border-color:#4d6bfe; color:#fff; }
+  button.primary:disabled, button:disabled { opacity:.45; cursor:not-allowed; }
+  button.danger { background:#e5484d; border-color:#e5484d; color:#fff; }
+  .error-box {
+    font-size:12px; color:#d6313a; background: rgba(229,72,77,.1); border:1px solid rgba(229,72,77,.35);
+    border-radius: 8px; padding: 8px 10px; margin-top: 8px;
+  }
+  @media (prefers-color-scheme: dark) { .error-box { color:#ff7375; } }
+  .retry { font-size: 11px; padding: 2px 10px; margin-left: 8px; }
+  .kernel-header { display:flex; align-items:center; gap:10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .kernel-header .status { font-size: 12px; }
+  .kernel-header .status b { font-weight: 600; }
+  .version-list {
+    max-height: 320px; overflow-y: auto; border: 1px solid rgba(128,128,128,.15); border-radius: 8px;
+  }
+  .version-row {
+    display:flex; align-items:center; gap: 10px; padding: 8px 12px;
+    border-top: 1px solid rgba(128,128,128,.12);
+  }
+  .version-row:first-child { border-top: none; }
+  .version-row .ver { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .version-row .time { font-size: 11px; opacity:.55; white-space: nowrap; }
+  .version-row .spacer { flex: 1; }
+  .version-row .actions { display:flex; align-items:center; gap: 6px; }
+  .confirm-box {
+    display:flex; align-items:center; gap: 8px; flex-wrap: wrap; font-size: 12px;
+  }
+  .spinner {
+    display:inline-block; width:11px; height:11px;
+    border: 2px solid rgba(128,128,128,.35); border-top-color: #4d6bfe;
+    border-radius:50%; animation: spin .7s linear infinite; vertical-align: -1px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .log-panel {
+    margin-top: 10px; font: 11px/1.5 ui-monospace, Menlo, monospace;
+    background: rgba(128,128,128,.08); border-radius: 8px; padding: 8px 10px;
+    max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  .empty { padding: 18px 0; text-align:center; opacity:.55; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>检查更新 <button class="refresh" id="refreshBtn">刷新</button></h1>
+  <div class="sub">同时检测容器（壳应用）与内核（@deepseek-ai/dsh）的可用版本。</div>
+
+  <div class="card" id="shellCard">加载中…</div>
+  <div class="card" id="kernelCard">加载中…</div>
+
+<script>
+const $ = (s, root=document) => root.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+let STATE = { shell: null, kernel: null };
+let switching = null; // { version, logs: string[] } | null
+let switchError = null;
+let confirmVersion = null; // 正在二次确认的版本号
+
+function relTime(iso) {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const diff = Date.now() - t;
+  const min = 60_000, hour = 3_600_000, day = 86_400_000;
+  if (diff < min) return '刚刚';
+  if (diff < hour) return `${Math.round(diff / min)} 分钟前`;
+  if (diff < day) return `${Math.round(diff / hour)} 小时前`;
+  const days = Math.round(diff / day);
+  if (days < 30) return `${days} 天前`;
+  const months = Math.round(days / 30);
+  if (months < 12) return `${months} 个月前`;
+  return `${Math.round(months / 12)} 年前`;
+}
+
+function tagFor(entry) {
+  const tags = [];
+  if (entry.recommended) tags.push('<span class="tag recommended">推荐</span>');
+  tags.push(`<span class="tag ${esc(entry.tag)}">${esc(entry.tag)}</span>`);
+  return tags.join(' ');
+}
+
+function renderShellCard() {
+  const s = STATE.shell;
+  if (!s) {
+    $('#shellCard').innerHTML = `<h2>容器（壳应用）</h2><div class="row muted">加载中…</div>`;
+    return;
+  }
+  const cur = `<span class="ver">v${esc(s.currentVersion)}</span>`;
+  let body;
+  if (!s.latest) {
+    body = `<div class="row">当前版本 ${cur}</div>
+      <div class="error-box">无法连接 GitHub<button class="retry" id="shellRetry">点击重试</button></div>`;
+  } else if (s.latest.hasUpdate) {
+    body = `<div class="row">当前版本 ${cur} · <span class="muted">发现新版本</span> <b>v${esc(s.latest.latestTag)}</b></div>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="shellDownload">前往下载页</button>
+      </div>`;
+  } else {
+    body = `<div class="row">当前版本 ${cur} · <span class="muted">容器已是最新版本</span></div>`;
+  }
+  $('#shellCard').innerHTML = `<h2>容器（壳应用）</h2>${body}`;
+  $('#shellRetry')?.addEventListener('click', refresh);
+  $('#shellDownload')?.addEventListener('click', () => {
+    if (s.latest?.htmlUrl) window.updateAPI.openExternal(s.latest.htmlUrl);
+  });
+}
+
+function kernelStatusLine() {
+  const k = STATE.kernel;
+  const activeLabel = k.activeVersion ? `v${esc(k.activeVersion)}` : '未知';
+  if (k.pinnedVersion) {
+    return `<span class="status">当前激活 <b>${activeLabel}</b> · <span class="tag pinned">已固定</span></span>
+      <button id="clearPinBtn" ${switching ? 'disabled' : ''}>恢复自动跟随最新推荐版</button>`;
+  }
+  return `<span class="status">当前激活 <b>${activeLabel}</b> · <span class="tag recommended">跟随最新推荐版</span></span>`;
+}
+
+function versionRow(entry) {
+  const isActive = STATE.kernel.activeVersion === entry.version;
+  const busy = !!switching;
+  let action;
+  if (confirmVersion === entry.version) {
+    action = `<div class="confirm-box">
+      确定切换到 v${esc(entry.version)}？服务会短暂重启。
+      <button class="primary" data-act="confirm-switch" data-version="${esc(entry.version)}">确认</button>
+      <button data-act="cancel-switch">取消</button>
+    </div>`;
+  } else if (switching && switching.version === entry.version) {
+    action = `<span class="spinner"></span> 切换中…`;
+  } else if (isActive) {
+    action = `<button disabled>当前使用中</button>`;
+  } else {
+    action = `<button data-act="ask-switch" data-version="${esc(entry.version)}" ${busy ? 'disabled' : ''}>切换到此版本</button>`;
+  }
+  return `<div class="version-row">
+    <span class="ver">v${esc(entry.version)}</span>
+    ${tagFor(entry)}
+    <span class="time">${esc(relTime(entry.publishedAt))}</span>
+    <span class="spacer"></span>
+    <span class="actions">${action}</span>
+  </div>`;
+}
+
+function renderKernelCard() {
+  const k = STATE.kernel;
+  if (!k) {
+    $('#kernelCard').innerHTML = `<h2>内核（@deepseek-ai/dsh）</h2><div class="row muted">加载中…</div>`;
+    return;
+  }
+  let listHtml;
+  if (!k.entries) {
+    listHtml = `<div class="error-box">检测失败<button class="retry" id="kernelRetry">点击重试</button></div>`;
+  } else if (k.entries.length === 0) {
+    listHtml = `<div class="empty">暂无已发布版本</div>`;
+  } else {
+    listHtml = `<div class="version-list">${k.entries.map(versionRow).join('')}</div>`;
+  }
+  const errorHtml = switchError
+    ? `<div class="error-box">切换失败：${esc(switchError)}</div>`
+    : '';
+  const logHtml = switching && switching.logs.length
+    ? `<div class="log-panel">${switching.logs.map(esc).join('\n')}</div>`
+    : '';
+  $('#kernelCard').innerHTML = `
+    <h2>内核（@deepseek-ai/dsh）</h2>
+    <div class="kernel-header">${kernelStatusLine()}</div>
+    ${listHtml}
+    ${errorHtml}
+    ${logHtml}
+  `;
+  $('#kernelRetry')?.addEventListener('click', refresh);
+  $('#clearPinBtn')?.addEventListener('click', clearPin);
+}
+
+function render() {
+  renderShellCard();
+  renderKernelCard();
+}
+
+async function refresh() {
+  $('#refreshBtn').disabled = true;
+  try {
+    STATE = await window.updateAPI.refresh();
+  } finally {
+    $('#refreshBtn').disabled = false;
+    render();
+  }
+}
+
+async function clearPin() {
+  switchError = null;
+  switching = { version: STATE.kernel.latestTag || STATE.kernel.activeVersion, logs: [] };
+  render();
+  const res = await window.updateAPI.clearPin();
+  switching = null;
+  if (res.ok) {
+    STATE = res.state;
+  } else {
+    switchError = res.error || '恢复自动跟随失败';
+  }
+  render();
+}
+
+async function doSwitch(version) {
+  confirmVersion = null;
+  switchError = null;
+  switching = { version, logs: [] };
+  render();
+  const res = await window.updateAPI.switchKernel(version, true);
+  switching = null;
+  if (res.ok) {
+    STATE = res.state;
+  } else {
+    switchError = res.error || '切换失败';
+  }
+  render();
+}
+
+document.addEventListener('click', (ev) => {
+  const t = ev.target.closest('[data-act]');
+  if (!t) return;
+  if (t.dataset.act === 'ask-switch') {
+    confirmVersion = t.dataset.version;
+    render();
+  } else if (t.dataset.act === 'cancel-switch') {
+    confirmVersion = null;
+    render();
+  } else if (t.dataset.act === 'confirm-switch') {
+    doSwitch(t.dataset.version);
+  }
+});
+
+$('#refreshBtn').addEventListener('click', refresh);
+
+window.updateAPI.onInstallLog((line) => {
+  if (!switching) return;
+  switching.logs.push(line);
+  if (switching.logs.length > 200) switching.logs.splice(0, switching.logs.length - 200);
+  renderKernelCard();
+});
+
+async function load() {
+  STATE = await window.updateAPI.getState();
+  render();
+}
+load();
+</script>
+</body>
+</html>
