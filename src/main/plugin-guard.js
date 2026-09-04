@@ -341,7 +341,9 @@ async function updatePlugin(profileDir, name, { targetVersion, nodeBin, pnpmCjs,
     try {
       await fsPromises.copyFile(path.join(backupDir, 'package.json'), pkgFile);
     } catch {}
-    return { name, from: oldRange, to: pkg.dependencies[name], ok: false, error: String(err.message || err) };
+    const error = String(err.message || err);
+    log(`[guard]   ✗ ${path.basename(profileDir)}: ${name} 更新失败：${error}`);
+    return { name, from: oldRange, to: pkg.dependencies[name], ok: false, error };
   }
 }
 
