@@ -61,18 +61,29 @@ Windows 说明：
 
 ## 更新机制
 
-每次启动：
+每次启动，除非已手动固定某个内核版本（见下文）：
 
 1. `GET https://registry.npmjs.org/@deepseek-ai/dsh/latest` 取最新版本；
 2. 与本地激活版本 semver 比较（支持 `-rc.N` 预发布排序）；
 3. 有新版：下载安装到 `<数据目录>/runtime/versions/v<版本>/`，成功后把 `runtime/current` 符号链接原子切换过去；失败则保留原版本继续用旧的；
-4. 自动清理：仅保留最近 2 个版本。
+4. 自动清理：仅保留最近 2 个版本（若有手动固定的版本，额外保留它——见下文）。
 
 离线时跳过检测，直接用已装版本；本地无任何版本且离线才报错。
 
-手动触发：菜单栏 **DSH Web → 检查更新…**（⌘U），下载完成后可选择立即应用或下次启动生效。
-
 菜单 **关于 DSH Web** 会同时显示容器版本与内核版本（官方运行时 `@deepseek-ai/dsh` 的当前激活版本）。
+
+### 检查更新窗口
+
+菜单栏 **DSH Web → 检查更新…**（⌘U）打开一个独立窗口，同时覆盖容器和内核两部分：
+
+![检查更新窗口：容器卡片显示当前版本以及 GitHub 上是否有新 Release，内核卡片列出全部已发布的 npm 版本，带标签、发布时间和切换按钮](docs/screenshots/update-check.png)
+
+- **容器（壳应用本身）**：与本仓库 [GitHub Releases](https://github.com/honghuachen/deepseekharness-desktop/releases) 上的最新 tag 比较。只做检测，不自动下载安装（应用在两个平台都未做代码签名/公证），只提供一个跳转到 Release 页面的按钮。
+- **内核（`@deepseek-ai/dsh`）**：按时间倒序列出 npm 上发布过的全部版本，标注 `alpha` / `rc`（或者一旦官方真的发布正式版，`stable`），npm `latest` dist-tag 对应的那个版本标"推荐"。可以切换到列表里的任意版本；切换会短暂重启后台服务，并实时展示安装日志。
+- 切换到某个版本会**固定**它：之后启动时不再自动检测更新，`prune()` 清理也不会碰它（即使它超出"最近 2 个版本"的范围）。点击**"恢复自动跟随最新推荐版"**可以取消固定，恢复到每次启动都自动更新到 npm `latest`。
+- 容器和内核两边的检测互相独立——GitHub API 抖动只会让容器那张卡片显示"检测失败，点击重试"，不影响内核那边正常工作。
+
+> 这里的"推荐"指的是 npm 的 `latest` dist-tag（官方从一开始就在维护这个标签），**不是** semver 里"无预发布后缀"那个概念。截至目前，`@deepseek-ai/dsh` 发布的每一个版本仍然带 `-rc.N`/`-alpha.N` 后缀，还没有真正的正式版——UI 上刻意不用"稳定版"这个词，就是这个原因。
 
 ## 目录布局
 
@@ -96,7 +107,8 @@ Windows 说明：
   "channel": "latest",       // 更新频道（当前为 npm latest）
   "autoCheckUpdates": true,  // 关闭后每次启动不再检测
   "dshHome": "",             // 留空 = 官方标准 ~/.dsh；可指向自定义目录隔离
-  "taskBadge": true          // 会话任务完成后在 Dock/任务栏图标显示完成数量角标
+  "taskBadge": true,         // 会话任务完成后在 Dock/任务栏图标显示完成数量角标
+  "pinnedKernelVersion": "" // 留空 = 自动更新到 npm latest；在"检查更新"窗口里手动切换版本后会写入这里
 }
 ```
 
@@ -150,6 +162,10 @@ src/main/
 ├── main.js              # 启动编排、窗口、菜单、生命周期、崩溃自愈
 ├── config.js            # 路径与常量（registry URL、构建白名单）
 ├── updater.js           # 更新引擎：检测/安装/原子切换/清理（纯 node，可测）
+├── kernel-versions.js   # 拉取 @deepseek-ai/dsh 在 npm 上全部已发布版本（纯 node，可测）
+├── shell-update.js      # 查 GitHub Releases 判断容器是否有新版（纯 node，可测）
+├── kernel-switch.js     # 内核版本切换状态机：安装 → 激活 → 落盘 pin（纯 node，可测）
+├── update-window.js     # 检查更新窗口（容器+内核）+ 其 IPC
 ├── runner.js            # 官方服务进程管理：拉起/双重健康检查/优雅退出
 ├── plugin-guard.js      # 第三方插件守卫：外科手术式恢复官方 profile
 ├── plugin-manager.js    # 第三方插件管理器窗口
@@ -174,6 +190,9 @@ scripts/
 ├── e2e-update-test.mjs    # 无头端到端测试（真实 registry 全链路）
 ├── test-plugin-update.mjs # 第三方插件更新逻辑自测
 ├── test-token-usage.mjs   # Token 用量统计模块自测（含真实文件解压回归）
+├── kernel-versions-test.mjs # npm 版本列表解析/分类/排序自测
+├── shell-update-test.mjs  # GitHub Releases 更新检测自测
+├── kernel-switch-test.mjs # 内核切换状态机自测（含 pin / 失败不改状态）
 ├── badge-test.mjs         # 任务完成角标自测
 ├── plugin-guard-test.mjs  # 插件守卫自测
 ├── repair-session.mjs     # 修复损坏的 session.jsonl(.zstd) 序号
@@ -183,7 +202,7 @@ scripts/
 ## 测试
 
 ```bash
-npm test          # 快速回归套件：角标 / 插件守卫 / 插件更新 / Token 用量统计（无网络依赖）
+npm test          # 快速回归套件：角标 / 插件守卫 / 插件更新 / Token 用量统计 / 内核版本列表 / 容器更新检测 / 内核切换（无网络依赖）
 npm run test:e2e  # 端到端更新流程测试（真实连 npm registry，较慢）
 ```
 

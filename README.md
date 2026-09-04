@@ -62,18 +62,29 @@ Windows notes:
 
 ## Update mechanism
 
-On every launch:
+On every launch, unless a kernel version has been manually pinned (see below):
 
 1. `GET https://registry.npmjs.org/@deepseek-ai/dsh/latest` to fetch the latest version;
 2. Compare it against the currently active local version using semver (pre-release ordering like `-rc.N` is supported);
 3. If newer: download and install into `<data dir>/runtime/versions/v<version>/`, then atomically flip the `runtime/current` symlink over to it on success; on failure, the previous version stays active;
-4. Auto-cleanup: only the 2 most recent versions are kept.
+4. Auto-cleanup: only the 2 most recent versions are kept (plus a pinned version, if any — see below).
 
 Offline: the check is skipped and the already-installed version is used directly; an error is only raised if there's no installed version at all and the machine is offline.
 
-Manual trigger: menu **DSH Web → Check for Updates…** (⌘U); once downloaded you can apply it immediately or defer to the next launch.
-
 The **About DSH Web** menu item shows both the container's own version and the "kernel" version (the currently active version of the official `@deepseek-ai/dsh` runtime).
+
+### Check for Updates window
+
+Menu **DSH Web → Check for Updates…** (⌘U) opens a dedicated window covering both halves of the app:
+
+![Check for Updates window: a container card showing the current version and whether a newer GitHub Release is available, and a kernel card listing every published npm version with tags, publish time, and a switch button](docs/screenshots/update-check.png)
+
+- **Container (the shell app itself)**: compares the current version against the latest tag on [GitHub Releases](https://github.com/honghuachen/deepseekharness-desktop/releases) for this repo. This is detection-only — there's no auto-download/auto-install (the app isn't code-signed/notarized on either platform), just a button to jump to the release page.
+- **Kernel (`@deepseek-ai/dsh`)**: lists every version ever published to npm, newest first, tagged `alpha` / `rc` / (once the official package ships one) a true `stable`, with the version behind npm's `latest` dist-tag marked "Recommended". You can switch to any version in the list; switching briefly restarts the background service and streams the install log live.
+- Switching to a version **pins** it: from then on, launch-time auto-update is skipped for that version, and `prune()` won't clean it up even if it falls outside the "2 most recent" window. Click **"Resume following the latest recommended version"** to unpin and go back to auto-updating to npm `latest` on every launch.
+- The container and kernel checks are independent — a GitHub API hiccup only shows an inline "Retry" on that one card, the other keeps working.
+
+> "Recommended" here means npm's `latest` dist-tag, which the official package has maintained since day one — it is **not** the semver notion of "no pre-release suffix". As of writing, every published version of `@deepseek-ai/dsh` still carries a `-rc.N`/`-alpha.N` suffix, so there's no true GA release yet; the UI intentionally avoids the word "stable" for that reason.
 
 ## Directory layout
 
@@ -97,7 +108,8 @@ The **About DSH Web** menu item shows both the container's own version and the "
   "channel": "latest",       // update channel (currently only npm's `latest`)
   "autoCheckUpdates": true,  // disable to skip the update check on every launch
   "dshHome": "",             // empty = the official standard ~/.dsh; point elsewhere to isolate data
-  "taskBadge": true          // show a completed-task count badge on the Dock/taskbar icon
+  "taskBadge": true,         // show a completed-task count badge on the Dock/taskbar icon
+  "pinnedKernelVersion": ""  // empty = auto-update to npm `latest`; set via the Check for Updates window to pin a specific kernel version
 }
 ```
 
@@ -145,6 +157,10 @@ src/main/
 ├── main.js              # startup orchestration, windows, menu, lifecycle, crash self-healing
 ├── config.js            # paths and constants (registry URL, build allowlist)
 ├── updater.js           # update engine: check/install/atomic-swap/cleanup (pure Node, testable)
+├── kernel-versions.js   # fetches every published npm version of @deepseek-ai/dsh (pure Node, testable)
+├── shell-update.js      # checks GitHub Releases for a newer container version (pure Node, testable)
+├── kernel-switch.js     # kernel version switch state machine: install → activate → persist pin (pure Node, testable)
+├── update-window.js     # Check for Updates window (container + kernel) + its IPC handlers
 ├── runner.js            # official service process management: launch/double health check/graceful exit
 ├── plugin-guard.js      # third-party plugin guard: surgically restores an official profile
 ├── plugin-manager.js    # third-party plugin manager window
@@ -169,6 +185,9 @@ scripts/
 ├── e2e-update-test.mjs    # headless end-to-end test (hits the real registry, full chain)
 ├── test-plugin-update.mjs # self-test for third-party plugin update logic
 ├── test-token-usage.mjs   # self-test for the token usage module (incl. a real-file decompression regression)
+├── kernel-versions-test.mjs # self-test for parsing/classifying/sorting the npm version list
+├── shell-update-test.mjs  # self-test for the GitHub Releases update check
+├── kernel-switch-test.mjs # self-test for the kernel switch state machine (incl. pin/rollback-on-failure)
 ├── badge-test.mjs         # self-test for the task-completion badge
 ├── plugin-guard-test.mjs  # self-test for the plugin guard
 ├── repair-session.mjs     # repairs sequence numbers in a corrupted session.jsonl(.zstd)
@@ -178,7 +197,7 @@ scripts/
 ## Testing
 
 ```bash
-npm test          # fast regression suite: badge / plugin guard / plugin update / token usage (no network needed)
+npm test          # fast regression suite: badge / plugin guard / plugin update / token usage / kernel versions / shell update / kernel switch (no network needed)
 npm run test:e2e  # end-to-end update flow test (hits the real npm registry, slower)
 ```
 
