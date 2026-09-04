@@ -1,7 +1,7 @@
 {
   "name": "deepseek-harness-web",
   "productName": "DSH Web",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "窗口化承载官方 DeepSeek Harness Web 壳的桌面容器，每次启动自动检测并更新官方运行时",
   "license": "MIT",
   "private": true,
@@ -19,5 +19,8 @@
   "devDependencies": {
     "electron": "44.0.0",
     "electron-builder": "26.15.3"
+  },
+  "dependencies": {
+    "fzstd": "^0.1.1"
   }
 }

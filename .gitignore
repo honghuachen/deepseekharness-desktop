@@ -5,3 +5,4 @@ release/
 release-build/
 *.log
 .DS_Store
+.serena/

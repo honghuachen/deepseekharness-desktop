@@ -25,6 +25,7 @@ const { createBadgeWatcher } = require('./badge');
 const { createLogger } = require('./logger');
 const { createStatusWindow } = require('./status-window');
 const { openPluginManager } = require('./plugin-manager');
+const { openTokenUsageWindow } = require('./token-usage/window');
 
 const execFileP = promisify(execFile);
 
@@ -465,6 +466,19 @@ function handleServerExit({ code, signal }) {
   attempt();
 }
 
+/** 菜单动作：打开 Token 用量统计窗口 */
+function openTokenUsage() {
+  try {
+    openTokenUsageWindow({
+      dshHome: resolveDshHome(),
+      dataRoot,
+      log: logLine,
+    });
+  } catch (err) {
+    dialog.showMessageBox({ type: 'error', message: '无法打开用量统计', detail: String(err.message || err) });
+  }
+}
+
 /** 菜单动作：打开第三方插件管理器（浏览 / 勾选移除） */
 function openManager() {
   try {
@@ -557,6 +571,11 @@ function buildMenu() {
         {
           label: '管理第三方插件…',
           click: () => openManager(),
+        },
+        {
+          label: 'Token 用量统计…',
+          accelerator: 'CmdOrCtrl+Shift+T',
+          click: () => openTokenUsage(),
         },
         {
           label: '打开日志文件夹',

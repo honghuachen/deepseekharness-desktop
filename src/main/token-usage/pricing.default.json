@@ -1,0 +1,24 @@
+{
+  "_comment": "DeepSeek Harness 可以路由到任意 provider/模型（本机真实会话里出现过 openrouter、sensenova、zhipu、google 等各家模型），这里只内置了 DeepSeek 官方模型的定价，其余模型会显示“未知定价”。这份文件首次运行后会被拷贝到用户数据目录下的 pricing.json，之后可以自行编辑补充，不会被应用更新覆盖。",
+  "_pricing_note": "DeepSeek 官方 API 按 UTC 高峰/非高峰时段分时计价，这里只取“非高峰”（较低）价位做单一近似估算，因此费用是 ≈ 估算值，不是精确账单。以官方文档 https://api-docs.deepseek.com/quick_start/pricing 为准。",
+  "models": {
+    "deepseek-v4-flash": {
+      "input_per_million_usd": 0.22,
+      "output_per_million_usd": 0.66,
+      "cache_read_per_million_usd": 0.007,
+      "cache_write_per_million_usd": 0
+    },
+    "deepseek-v4-pro": {
+      "input_per_million_usd": 0.66,
+      "output_per_million_usd": 1.98,
+      "cache_read_per_million_usd": 0.022,
+      "cache_write_per_million_usd": 0
+    },
+    "deepseek-v4-flash-vision-exp": {
+      "input_per_million_usd": 0.22,
+      "output_per_million_usd": 0.66,
+      "cache_read_per_million_usd": 0.007,
+      "cache_write_per_million_usd": 0
+    }
+  }
+}

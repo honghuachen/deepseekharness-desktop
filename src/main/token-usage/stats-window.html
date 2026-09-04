@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Token 用量统计</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --fg: #1d2129;
+    --fg-secondary: #6b7280;
+    --border: rgba(0, 0, 0, 0.08);
+    --seg-bg: rgba(0, 0, 0, 0.06);
+    --seg-active-bg: #ffffff;
+    --row-hover: rgba(0, 0, 0, 0.035);
+    --accent: #4d6bfe;
+    --modal-bg: #ffffff;
+    --modal-overlay: rgba(0, 0, 0, 0.35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a;
+      --fg: #d6d9dd;
+      --fg-secondary: #93979e;
+      --border: rgba(255, 255, 255, 0.08);
+      --seg-bg: rgba(255, 255, 255, 0.08);
+      --seg-active-bg: rgba(255, 255, 255, 0.14);
+      --row-hover: rgba(255, 255, 255, 0.05);
+      --modal-bg: #232427;
+      --modal-overlay: rgba(0, 0, 0, 0.55);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #root {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    padding: 16px;
+    gap: 10px;
+  }
+
+  .segmented {
+    display: flex;
+    background: var(--seg-bg);
+    border-radius: 8px;
+    padding: 2px;
+    gap: 2px;
+    flex-wrap: wrap;
+  }
+  .segmented button {
+    flex: 1 1 auto;
+    border: none;
+    background: transparent;
+    color: var(--fg);
+    padding: 5px 8px;
+    font-size: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .segmented button.active {
+    background: var(--seg-active-bg);
+    box-shadow: 0 1px 2px var(--border);
+    font-weight: 600;
+  }
+
+  .summary { display: flex; flex-direction: column; gap: 2px; }
+  .summary .total { font-size: 18px; font-weight: 600; }
+  .summary .sub { font-size: 12px; color: var(--fg-secondary); }
+
+  .list {
+    flex: 1;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+  }
+  .row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px 4px;
+    border-radius: 6px;
+  }
+  .row.clickable { cursor: pointer; }
+  .row.clickable:hover { background: var(--row-hover); }
+  .row-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .row-name {
+    /* 中间省略号已经由 JS 的 truncateMiddle() 处理；这里不再叠加 CSS 的
+       text-overflow:ellipsis，否则遇到容器实际像素宽度不够时会在末尾再截一刀，
+       出现"...xxx..."这种双省略号的怪状态。溢出部分直接硬裁切即可。 */
+    overflow: hidden;
+    white-space: nowrap;
+    max-width: 62%;
+  }
+  .row-value {
+    color: var(--fg-secondary);
+    white-space: nowrap;
+    font-size: 12px;
+  }
+  .row-bar-track { height: 5px; }
+  .row-bar {
+    height: 5px;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  .row-breakdown {
+    color: var(--fg-secondary);
+    font-size: 10px;
+    line-height: 1.5;
+  }
+  .empty-hint {
+    color: var(--fg-secondary);
+    padding: 24px 4px;
+    text-align: center;
+    font-size: 12px;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--modal-overlay);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay[hidden] { display: none; }
+  .modal {
+    background: var(--modal-bg);
+    border-radius: 10px;
+    padding: 18px;
+    width: 260px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  }
+  .modal h2 { font-size: 13px; margin: 0 0 12px; }
+  .modal-field { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; gap: 8px; }
+  .modal-field label { color: var(--fg-secondary); }
+  .modal-field input[type="date"] {
+    font: inherit;
+    color: var(--fg);
+    background: var(--seg-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 6px;
+  }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  .modal-actions button {
+    border: none;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .modal-actions .primary { background: var(--accent); color: #fff; }
+  .modal-actions .secondary { background: var(--seg-bg); color: var(--fg); }
+</style>
+</head>
+<body>
+  <div id="root">
+    <div class="segmented" id="range-segmented">
+      <button data-range="today" class="active">今日</button>
+      <button data-range="yesterday">昨天</button>
+      <button data-range="thisWeek">本周</button>
+      <button data-range="thisMonth">本月</button>
+      <button data-range="all">全部</button>
+      <button data-range="custom">自定义</button>
+    </div>
+
+    <div class="summary">
+      <div class="total" id="total-label">0 tokens</div>
+      <div class="sub" id="cost-label">≈ $0.00</div>
+      <div class="sub" id="cache-label">缓存：写入 0 · 读取 0 · 命中率 -</div>
+    </div>
+
+    <div class="segmented" id="grouping-segmented">
+      <button data-grouping="byProject" class="active">按项目</button>
+      <button data-grouping="byModel">按模型</button>
+      <button data-grouping="bySession">按会话</button>
+    </div>
+
+    <div class="list" id="list"></div>
+  </div>
+
+  <div class="modal-overlay" id="custom-range-modal" hidden>
+    <div class="modal">
+      <h2>选择自定义日期区间</h2>
+      <div class="modal-field">
+        <label>开始</label>
+        <input type="date" id="custom-start" />
+      </div>
+      <div class="modal-field">
+        <label>结束</label>
+        <input type="date" id="custom-end" />
+      </div>
+      <div class="modal-actions">
+        <button class="secondary" id="custom-cancel">取消</button>
+        <button class="primary" id="custom-confirm">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      rangeKey: 'today',
+      grouping: 'byProject',
+      customStart: null,
+      customEnd: null,
+      lastNonCustomRange: 'today',
+      lastAggregate: null,
+    };
+
+    const els = {
+      rangeSeg: document.getElementById('range-segmented'),
+      groupingSeg: document.getElementById('grouping-segmented'),
+      total: document.getElementById('total-label'),
+      cost: document.getElementById('cost-label'),
+      cache: document.getElementById('cache-label'),
+      list: document.getElementById('list'),
+      modal: document.getElementById('custom-range-modal'),
+      customStart: document.getElementById('custom-start'),
+      customEnd: document.getElementById('custom-end'),
+      customCancel: document.getElementById('custom-cancel'),
+      customConfirm: document.getElementById('custom-confirm'),
+    };
+
+    function formattedTokenCount(count) {
+      const HUNDRED_MILLION = 100_000_000;
+      if (count >= HUNDRED_MILLION) return (count / HUNDRED_MILLION).toFixed(2) + '亿';
+      if (count >= 1_000_000) return (count / 1_000_000).toFixed(1) + 'M';
+      if (count >= 1_000) return (count / 1_000).toFixed(1) + 'K';
+      return String(count);
+    }
+
+    function formattedCost(costUSD) {
+      return costUSD == null ? '-' : '$' + costUSD.toFixed(2);
+    }
+
+    function truncateMiddle(str, maxChars) {
+      if (str.length <= maxChars) return str;
+      const keep = maxChars - 1;
+      const head = Math.ceil(keep / 2);
+      const tail = Math.floor(keep / 2);
+      return str.slice(0, head) + '…' + str.slice(str.length - tail);
+    }
+
+    function setActiveButton(container, selector, value) {
+      container.querySelectorAll('button').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset[selector] === value);
+      });
+    }
+
+    function headerValueText(tokens, hitRate, costText) {
+      const hitRateText = hitRate == null ? '-' : Math.round(hitRate * 100) + '%';
+      return `${formattedTokenCount(tokens)} · 缓存率 ${hitRateText} · ${costText}`;
+    }
+
+    function costBreakdownText(item) {
+      const cacheTokens = item.cacheCreationInputTokens + item.cacheReadInputTokens;
+      const cacheCostUSD =
+        item.cacheWriteCostUSD == null || item.cacheReadCostUSD == null
+          ? null
+          : item.cacheWriteCostUSD + item.cacheReadCostUSD;
+      return [
+        `输入 ${formattedTokenCount(item.inputTokens)}·${formattedCost(item.inputCostUSD)}`,
+        `输出 ${formattedTokenCount(item.outputTokens)}·${formattedCost(item.outputCostUSD)}`,
+        `写入 ${formattedTokenCount(item.cacheCreationInputTokens)}·${formattedCost(item.cacheWriteCostUSD)}`,
+        `读取 ${formattedTokenCount(item.cacheReadInputTokens)}·${formattedCost(item.cacheReadCostUSD)}`,
+        `缓存合计 ${formattedTokenCount(cacheTokens)}·${formattedCost(cacheCostUSD)}`,
+      ].join('  ');
+    }
+
+    function makeRow({ name, tokens, hitRate, costText, maxTokens, breakdown, path }) {
+      const row = document.createElement('div');
+      row.className = 'row' + (path ? ' clickable' : '');
+
+      const header = document.createElement('div');
+      header.className = 'row-header';
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'row-name';
+      nameEl.textContent = truncateMiddle(name, 46);
+      nameEl.title = path ? `点击打开目录：${name}` : name;
+
+      const valueEl = document.createElement('div');
+      valueEl.className = 'row-value';
+      valueEl.textContent = headerValueText(tokens, hitRate, costText);
+
+      header.appendChild(nameEl);
+      header.appendChild(valueEl);
+      row.appendChild(header);
+
+      const barTrack = document.createElement('div');
+      barTrack.className = 'row-bar-track';
+      const bar = document.createElement('div');
+      bar.className = 'row-bar';
+      const width = maxTokens > 0 ? Math.max((tokens / maxTokens) * 160, 0) : 0;
+      bar.style.width = width + 'px';
+      barTrack.appendChild(bar);
+      row.appendChild(barTrack);
+
+      if (breakdown) {
+        const breakdownEl = document.createElement('div');
+        breakdownEl.className = 'row-breakdown';
+        breakdownEl.textContent = breakdown;
+        row.appendChild(breakdownEl);
+      }
+
+      if (path) {
+        row.addEventListener('click', () => window.tokenUsageAPI.openPath(path));
+      }
+      return row;
+    }
+
+    const sessionDateFormatter = new Intl.DateTimeFormat('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+
+    function sessionDisplayName(item) {
+      const projectName = item.cwd === 'unknown' ? '未知项目' : item.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+      const dateText = sessionDateFormatter.format(new Date(item.lastActivity)).replace(/\//g, '-');
+      let identifier;
+      if (item.sessionId.startsWith('unknown')) {
+        identifier = '未知会话';
+      } else {
+        // DSH 的会话 id 有的带字面量前缀 "session-"、有的没有；砍掉这个前缀再取前 8 位，
+        // 不然一堆行会因为共享前缀而全都显示成一样的 "session-"，看不出区别。
+        identifier = item.sessionId.replace(/^session-/, '').slice(0, 8);
+      }
+      return `${identifier} · ${projectName} · ${dateText}`;
+    }
+
+    function renderList(aggregate) {
+      els.list.innerHTML = '';
+
+      if (state.grouping === 'byProject') {
+        const items = aggregate.byProject;
+        if (!items.length) return showEmpty();
+        const maxTokens = Math.max(...items.map((i) => i.totalTokens), 1);
+        for (const item of items) {
+          const costText = item.includesUnknownPricedModel
+            ? `≈$${item.estimatedCostUSD.toFixed(2)}（含未知定价）`
+            : `$${item.estimatedCostUSD.toFixed(2)}`;
+          els.list.appendChild(
+            makeRow({
+              name: item.cwd,
+              tokens: item.totalTokens,
+              hitRate: item.cacheHitRate,
+              costText,
+              maxTokens,
+              path: item.cwd === 'unknown' ? null : item.cwd,
+            }),
+          );
+        }
+      } else if (state.grouping === 'byModel') {
+        const items = aggregate.byModel;
+        if (!items.length) return showEmpty();
+        const maxTokens = Math.max(...items.map((i) => i.totalTokens), 1);
+        for (const item of items) {
+          const costText = item.estimatedCostUSD == null ? '价格未知' : `$${item.estimatedCostUSD.toFixed(2)}`;
+          els.list.appendChild(
+            makeRow({
+              name: item.model,
+              tokens: item.totalTokens,
+              hitRate: item.cacheHitRate,
+              costText,
+              maxTokens,
+              breakdown: costBreakdownText(item),
+            }),
+          );
+        }
+      } else {
+        const items = aggregate.bySession;
+        if (!items.length) return showEmpty();
+        const maxTokens = Math.max(...items.map((i) => i.totalTokens), 1);
+        for (const item of items) {
+          const costText = item.includesUnknownPricedModel
+            ? `≈$${item.estimatedCostUSD.toFixed(2)}（含未知定价）`
+            : `$${item.estimatedCostUSD.toFixed(2)}`;
+          els.list.appendChild(
+            makeRow({
+              name: sessionDisplayName(item),
+              tokens: item.totalTokens,
+              hitRate: item.cacheHitRate,
+              costText,
+              maxTokens,
+              breakdown: costBreakdownText(item),
+              path: item.cwd === 'unknown' ? null : item.cwd,
+            }),
+          );
+        }
+      }
+    }
+
+    function showEmpty() {
+      const hint = document.createElement('div');
+      hint.className = 'empty-hint';
+      hint.textContent = '这个范围内还没有用量数据';
+      els.list.appendChild(hint);
+    }
+
+    function cacheSummaryText(aggregate) {
+      const hitRateText = aggregate.cacheHitRate == null ? '-' : Math.round(aggregate.cacheHitRate * 100) + '%';
+      return `缓存：写入 ${formattedTokenCount(aggregate.cacheCreationInputTokens)} · 读取 ${formattedTokenCount(aggregate.cacheReadInputTokens)} · 命中率 ${hitRateText}`;
+    }
+
+    async function render() {
+      const spec = { rangeKey: state.rangeKey, customStart: state.customStart, customEnd: state.customEnd };
+      const aggregate = await window.tokenUsageAPI.getAggregate(spec);
+      if (!aggregate) return;
+      state.lastAggregate = aggregate;
+
+      els.total.textContent = `${formattedTokenCount(aggregate.totalTokens)} tokens`;
+      const costSuffix = aggregate.includesUnknownPricedModels ? '（含未知定价模型）' : '';
+      els.cost.textContent = `≈ $${aggregate.estimatedCostUSD.toFixed(2)}${costSuffix}`;
+      els.cache.textContent = cacheSummaryText(aggregate);
+
+      renderList(aggregate);
+    }
+
+    els.rangeSeg.addEventListener('click', (evt) => {
+      const btn = evt.target.closest('button[data-range]');
+      if (!btn) return;
+      const range = btn.dataset.range;
+      if (range === 'custom') {
+        els.customStart.valueAsDate = state.customStart ? new Date(state.customStart) : new Date();
+        els.customEnd.valueAsDate = state.customEnd ? new Date(state.customEnd) : new Date();
+        els.modal.hidden = false;
+        return;
+      }
+      state.lastNonCustomRange = range;
+      state.rangeKey = range;
+      setActiveButton(els.rangeSeg, 'range', range);
+      render();
+    });
+
+    els.groupingSeg.addEventListener('click', (evt) => {
+      const btn = evt.target.closest('button[data-grouping]');
+      if (!btn) return;
+      state.grouping = btn.dataset.grouping;
+      setActiveButton(els.groupingSeg, 'grouping', state.grouping);
+      if (state.lastAggregate) renderList(state.lastAggregate);
+    });
+
+    els.customCancel.addEventListener('click', () => {
+      els.modal.hidden = true;
+      setActiveButton(els.rangeSeg, 'range', state.lastNonCustomRange);
+    });
+
+    els.customConfirm.addEventListener('click', () => {
+      const start = els.customStart.valueAsDate;
+      const end = els.customEnd.valueAsDate;
+      if (!start || !end) {
+        els.modal.hidden = true;
+        setActiveButton(els.rangeSeg, 'range', state.lastNonCustomRange);
+        return;
+      }
+      state.customStart = start.toISOString();
+      state.customEnd = end.toISOString();
+      state.rangeKey = 'custom';
+      els.modal.hidden = true;
+      setActiveButton(els.rangeSeg, 'range', 'custom');
+      render();
+    });
+
+    window.tokenUsageAPI.onRecordsUpdated(() => {
+      render();
+    });
+
+    window.tokenUsageAPI.reload().then(render);
+  </script>
+</body>
+</html>
