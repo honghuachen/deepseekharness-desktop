@@ -107,6 +107,8 @@ By default the app uses the official standard data directory `~/.dsh`, so sessio
 
 Third-party containers (e.g. the older DSH Desktop) may push community plugins into a profile through a plugin marketplace. These are often incompatible with newer official releases and can crash the web service on startup (showing up as a blank white window). To address that, this app provides:
 
+![Manage Third-Party Plugins window: plugins grouped by profile, tagged official/third-party and where each is referenced (bundle/patch layer), with checkboxes for bulk removal and per-plugin update checks](docs/screenshots/plugin-manager.png)
+
 1. **A plugin manager** (menu: DSH Web → Manage Third-Party Plugins…): browse every plugin under a profile, distinguish official vs. third-party and where each is referenced (bundle, patch layer), and remove selected ones precisely. Removal requires confirmation, and the original files are automatically backed up under the profile's `.sanitized-backup-*` directory.
 2. **Automatic cleanup on first launch**: if the web profile has been contaminated, it's restored to the official default shape, while user-level configuration for official components (e.g. the Funplay MCP) is preserved.
 3. **Crash self-healing**: the service auto-restarts if it exits unexpectedly; if it has never been cleaned before, cleanup runs first, then it restarts.
@@ -116,6 +118,8 @@ Third-party containers (e.g. the older DSH Desktop) may push community plugins i
 ## Token usage & cost stats
 
 Menu **DSH Web → Token 用量统计…** (⌘⇧T) opens a dedicated window that tallies token usage and estimated cost across every session under `~/.dsh/sessions`:
+
+![Token Usage Stats window: by-model view showing total tokens, estimated cost, cache hit rate, and the input/output/cache breakdown for each model](docs/screenshots/token-usage-stats.png)
 
 - **Time range**: today / yesterday / this week / this month / all time / a custom range
 - **Grouping**: by project (folded up to the repository root along `.git`, worktrees included) / by model / by session (capped at the 50 most recently active)
