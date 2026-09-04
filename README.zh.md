@@ -51,7 +51,7 @@ npm run dist         # 产出 macOS (dmg/zip) + Windows (NSIS 安装器/zip)
 | 平台 | 产物 |
 | --- | --- |
 | macOS arm64 | `DSH Web-<ver>-arm64.dmg` / `-mac.zip` |
-| Windows x64 | `DSH Web-Setup-<ver>-x64.exe` / `-win.zip` |
+| Windows x64 | `DSH-Web-Setup-<ver>-x64.exe` / `-win.zip` |
 
 Windows 说明：
 
@@ -78,7 +78,9 @@ Windows 说明：
 
 ![检查更新窗口：容器卡片显示当前版本以及 GitHub 上是否有新 Release，内核卡片列出全部已发布的 npm 版本，带标签、发布时间和切换按钮](docs/screenshots/update-check.png)
 
-- **容器（壳应用本身）**：与本仓库 [GitHub Releases](https://github.com/honghuachen/deepseekharness-desktop/releases) 上的最新 tag 比较。只做检测，不自动下载安装（应用在两个平台都未做代码签名/公证），只提供一个跳转到 Release 页面的按钮。
+- **容器（壳应用本身）**：与本仓库 [GitHub Releases](https://github.com/honghuachen/deepseekharness-desktop/releases) 上的最新 tag 比较。
+  - **Windows**：接了 `electron-updater`，可以直接"下载并安装"，装完点"重启并安装"原地替换重启；因为安装包未签名，关闭了运行时的 Authenticode 签名校验（`electron-builder.yml` 里 `win.verifyUpdateCodeSignature: false`）。发版时除了安装包本身，还要把 `electron-builder` 生成的 `latest.yml`/`.blockmap` 一起传到 Release，否则自动更新查不到新版本。
+  - **macOS**：未签名/未公证，Squirrel.Mac 强制要求签名才能自动更新，继续只做检测 + 提供跳转到 Release 页面的按钮。
 - **内核（`@deepseek-ai/dsh`）**：按时间倒序列出 npm 上发布过的全部版本，标注 `alpha` / `rc`（或者一旦官方真的发布正式版，`stable`），npm `latest` dist-tag 对应的那个版本标"推荐"。可以切换到列表里的任意版本；切换会短暂重启后台服务，并实时展示安装日志。
 - 切换到某个版本会**固定**它：之后启动时不再自动检测更新，`prune()` 清理也不会碰它（即使它超出"最近 2 个版本"的范围）。点击**"恢复自动跟随最新推荐版"**可以取消固定，恢复到每次启动都自动更新到 npm `latest`。
 - 容器和内核两边的检测互相独立——GitHub API 抖动只会让容器那张卡片显示"检测失败，点击重试"，不影响内核那边正常工作。
@@ -164,6 +166,7 @@ src/main/
 ├── updater.js           # 更新引擎：检测/安装/原子切换/清理（纯 node，可测）
 ├── kernel-versions.js   # 拉取 @deepseek-ai/dsh 在 npm 上全部已发布版本（纯 node，可测）
 ├── shell-update.js      # 查 GitHub Releases 判断容器是否有新版（纯 node，可测）
+├── shell-auto-updater.js # 容器自动更新：封装 electron-updater（仅 Windows）
 ├── kernel-switch.js     # 内核版本切换状态机：安装 → 激活 → 落盘 pin（纯 node，可测）
 ├── update-window.js     # 检查更新窗口（容器+内核）+ 其 IPC
 ├── runner.js            # 官方服务进程管理：拉起/双重健康检查/优雅退出

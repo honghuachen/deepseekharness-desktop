@@ -52,7 +52,7 @@ One build covers both platforms (electron-builder cross-builds the Windows targe
 | Platform | Artifacts |
 | --- | --- |
 | macOS arm64 | `DSH Web-<ver>-arm64.dmg` / `-mac.zip` |
-| Windows x64 | `DSH Web-Setup-<ver>-x64.exe` / `-win.zip` |
+| Windows x64 | `DSH-Web-Setup-<ver>-x64.exe` / `-win.zip` |
 
 Windows notes:
 
@@ -79,7 +79,9 @@ Menu **DSH Web → Check for Updates…** (⌘U) opens a dedicated window coveri
 
 ![Check for Updates window: a container card showing the current version and whether a newer GitHub Release is available, and a kernel card listing every published npm version with tags, publish time, and a switch button](docs/screenshots/update-check.png)
 
-- **Container (the shell app itself)**: compares the current version against the latest tag on [GitHub Releases](https://github.com/honghuachen/deepseekharness-desktop/releases) for this repo. This is detection-only — there's no auto-download/auto-install (the app isn't code-signed/notarized on either platform), just a button to jump to the release page.
+- **Container (the shell app itself)**: compares the current version against the latest tag on [GitHub Releases](https://github.com/honghuachen/deepseekharness-desktop/releases) for this repo.
+  - **Windows**: wired up to `electron-updater` — "Download & Install" fetches the update, then "Restart & Install" applies it in place. Because the installer isn't code-signed, Authenticode verification is disabled at runtime (`win.verifyUpdateCodeSignature: false` in `electron-builder.yml`). Every release must include the `latest.yml`/`.blockmap` files electron-builder generates alongside the installer, or the updater has nothing to compare against.
+  - **macOS**: unsigned/unnotarized, and Squirrel.Mac hard-requires signing to auto-update, so this stays detection-only — just a button to jump to the release page.
 - **Kernel (`@deepseek-ai/dsh`)**: lists every version ever published to npm, newest first, tagged `alpha` / `rc` / (once the official package ships one) a true `stable`, with the version behind npm's `latest` dist-tag marked "Recommended". You can switch to any version in the list; switching briefly restarts the background service and streams the install log live.
 - Switching to a version **pins** it: from then on, launch-time auto-update is skipped for that version, and `prune()` won't clean it up even if it falls outside the "2 most recent" window. Click **"Resume following the latest recommended version"** to unpin and go back to auto-updating to npm `latest` on every launch.
 - The container and kernel checks are independent — a GitHub API hiccup only shows an inline "Retry" on that one card, the other keeps working.
@@ -159,6 +161,7 @@ src/main/
 ├── updater.js           # update engine: check/install/atomic-swap/cleanup (pure Node, testable)
 ├── kernel-versions.js   # fetches every published npm version of @deepseek-ai/dsh (pure Node, testable)
 ├── shell-update.js      # checks GitHub Releases for a newer container version (pure Node, testable)
+├── shell-auto-updater.js # container auto-update: wraps electron-updater (Windows only)
 ├── kernel-switch.js     # kernel version switch state machine: install → activate → persist pin (pure Node, testable)
 ├── update-window.js     # Check for Updates window (container + kernel) + its IPC handlers
 ├── runner.js            # official service process management: launch/double health check/graceful exit

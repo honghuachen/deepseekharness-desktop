@@ -59,12 +59,31 @@ function registerIpc(context) {
     if (typeof url === 'string' && url) context.openExternal(url);
   });
 
+  ipcMain.handle(`${CHANNEL}:shell-download`, async () => {
+    if (!context.downloadShellUpdate) return { ok: false, error: '当前平台不支持自动安装' };
+    try {
+      return await context.downloadShellUpdate((percent) => {
+        if (win && !win.isDestroyed()) win.webContents.send(`${CHANNEL}:shell-progress`, percent);
+      });
+    } catch (err) {
+      context.log?.(`[update-window] 下载容器更新失败：${err.message}`);
+      return { ok: false, error: String(err.message || err) };
+    }
+  });
+
+  ipcMain.handle(`${CHANNEL}:shell-install`, () => {
+    context.installShellUpdate?.();
+    return { ok: true };
+  });
+
   return () => {
     ipcMain.removeHandler(`${CHANNEL}:get-state`);
     ipcMain.removeHandler(`${CHANNEL}:refresh`);
     ipcMain.removeHandler(`${CHANNEL}:switch-kernel`);
     ipcMain.removeHandler(`${CHANNEL}:clear-pin`);
     ipcMain.removeHandler(`${CHANNEL}:open-external`);
+    ipcMain.removeHandler(`${CHANNEL}:shell-download`);
+    ipcMain.removeHandler(`${CHANNEL}:shell-install`);
   };
 }
 
@@ -74,6 +93,8 @@ function registerIpc(context) {
  * @param {() => Promise<{activeVersion: string|null, pinnedVersion: string, latestTag: string|null, entries: object[]|null}>} context.getKernelInfo
  * @param {(version: string, opts: {pin: boolean, onLine?: Function}) => Promise<void>} context.switchKernelVersion
  * @param {(url: string) => void} context.openExternal
+ * @param {(onProgress?: (percent:number)=>void) => Promise<{ok:boolean, error?:string}>} [context.downloadShellUpdate]
+ * @param {() => void} [context.installShellUpdate]
  * @param {Function} [context.log]
  */
 function openUpdateWindow(context) {

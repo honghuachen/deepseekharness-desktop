@@ -2,6 +2,13 @@ appId: com.dragonplus.dsh-web
 productName: DSH Web
 copyright: MIT
 
+# 生成更新元数据（latest.yml / latest-mac.yml），供 electron-updater 在运行时比对。
+# 不加 --publish 时只在本地生成文件，不会自动上传；需要跟安装包一起手动传到 GitHub Release。
+publish:
+  provider: github
+  owner: honghuachen
+  repo: deepseekharness-desktop
+
 directories:
   output: release
   buildResources: assets
@@ -33,6 +40,9 @@ mac:
 
 win:
   # 在 macOS 上交叉打包；未签名，首次运行会有 SmartScreen 提示
+  # verifyUpdateCodeSignature: 运行时 electron-updater 默认会校验安装包的 Authenticode 签名，
+  # 未签名场景必须关闭，否则自动更新在校验这一步必然失败
+  verifyUpdateCodeSignature: false
   icon: assets/icon.png
   target:
     - target: nsis
@@ -46,6 +56,9 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
-  artifactName: DSH Web-Setup-${version}-x64.exe
+  # 文件名不能带空格：electron-updater 生成的 latest.yml 按这个名字原样记录，
+  # 但手动传到 GitHub Release 时（网页/gh CLI）文件名里的空格会被自动换成点号，
+  # 两边对不上会导致 Windows 自动更新永远找不到安装包
+  artifactName: DSH-Web-Setup-${version}-x64.exe
 
 npmRebuild: false

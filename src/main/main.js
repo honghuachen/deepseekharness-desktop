@@ -23,6 +23,7 @@ const { createUpdater } = require('./updater');
 const { createKernelSwitcher } = require('./kernel-switch');
 const { fetchAllKernelVersions } = require('./kernel-versions');
 const { checkShellUpdate } = require('./shell-update');
+const { createShellAutoUpdater } = require('./shell-auto-updater');
 const { createRunner } = require('./runner');
 const { createBadgeWatcher } = require('./badge');
 const { createLogger } = require('./logger');
@@ -518,10 +519,13 @@ function openManager() {
   }
 }
 
+// 容器自动更新：仅 Windows 支持（未签名的 mac 版本无法走 Squirrel.Mac 自动更新，见 shell-auto-updater.js）
+const shellAutoUpdater = createShellAutoUpdater({ log: logLine });
+
 /** 更新窗口：容器(壳)当前版本 + GitHub Releases 最新版检测（检测失败/无 Release 返回 latest: null） */
 async function getShellInfo() {
   const latest = await checkShellUpdate(app.getVersion(), { log: logLine });
-  return { currentVersion: app.getVersion(), latest };
+  return { currentVersion: app.getVersion(), latest, autoUpdateSupported: shellAutoUpdater.isSupported };
 }
 
 /** 更新窗口：内核当前激活/固定状态 + npm registry 全部已发布版本（拉取失败返回 entries: null） */
@@ -573,6 +577,8 @@ function openUpdateWindow() {
       getShellInfo,
       getKernelInfo,
       switchKernelVersion,
+      downloadShellUpdate: (onProgress) => shellAutoUpdater.checkAndDownload(onProgress),
+      installShellUpdate: () => shellAutoUpdater.quitAndInstall(),
       openExternal: (url) => shell.openExternal(url),
       log: logLine,
     });

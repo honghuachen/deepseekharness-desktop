@@ -98,6 +98,7 @@ let STATE = { shell: null, kernel: null };
 let switching = null; // { version, logs: string[] } | null
 let switchError = null;
 let confirmVersion = null; // 正在二次确认的版本号
+let shellUpdate = { status: 'idle', percent: 0, error: null }; // idle | downloading | downloaded
 
 function relTime(iso) {
   if (!iso) return '';
@@ -134,18 +135,45 @@ function renderShellCard() {
     body = `<div class="row">当前版本 ${cur}</div>
       <div class="error-box">无法连接 GitHub<button class="retry" id="shellRetry">点击重试</button></div>`;
   } else if (s.latest.hasUpdate) {
+    let autoPart = '';
+    if (s.autoUpdateSupported) {
+      if (shellUpdate.status === 'downloading') {
+        autoPart = `<span class="row"><span class="spinner"></span> 下载中 ${shellUpdate.percent}%…</span>`;
+      } else if (shellUpdate.status === 'downloaded') {
+        autoPart = `<button class="primary" id="shellInstall">重启并安装</button>`;
+      } else {
+        autoPart = `<button class="primary" id="shellAutoDownload">下载并安装</button>`;
+      }
+    }
+    const errHtml = shellUpdate.error
+      ? `<div class="error-box">${esc(shellUpdate.error)}</div>`
+      : '';
     body = `<div class="row">当前版本 ${cur} · <span class="muted">发现新版本</span> <b>v${esc(s.latest.latestTag)}</b></div>
       <div class="row" style="margin-top:8px">
-        <button class="primary" id="shellDownload">前往下载页</button>
-      </div>`;
+        ${autoPart}
+        <button id="shellDownloadPage">前往下载页</button>
+      </div>
+      ${errHtml}`;
   } else {
     body = `<div class="row">当前版本 ${cur} · <span class="muted">容器已是最新版本</span></div>`;
   }
   $('#shellCard').innerHTML = `<h2>容器（壳应用）</h2>${body}`;
   $('#shellRetry')?.addEventListener('click', refresh);
-  $('#shellDownload')?.addEventListener('click', () => {
+  $('#shellDownloadPage')?.addEventListener('click', () => {
     if (s.latest?.htmlUrl) window.updateAPI.openExternal(s.latest.htmlUrl);
   });
+  $('#shellAutoDownload')?.addEventListener('click', startShellAutoDownload);
+  $('#shellInstall')?.addEventListener('click', () => window.updateAPI.installShellUpdate());
+}
+
+async function startShellAutoDownload() {
+  shellUpdate = { status: 'downloading', percent: 0, error: null };
+  renderShellCard();
+  const res = await window.updateAPI.downloadShellUpdate();
+  shellUpdate = res.ok
+    ? { status: 'downloaded', percent: 100, error: null }
+    : { status: 'idle', percent: 0, error: res.error || '下载失败' };
+  renderShellCard();
 }
 
 function kernelStatusLine() {
@@ -280,6 +308,12 @@ window.updateAPI.onInstallLog((line) => {
   switching.logs.push(line);
   if (switching.logs.length > 200) switching.logs.splice(0, switching.logs.length - 200);
   renderKernelCard();
+});
+
+window.updateAPI.onShellProgress((percent) => {
+  if (shellUpdate.status !== 'downloading') return;
+  shellUpdate.percent = percent;
+  renderShellCard();
 });
 
 async function load() {

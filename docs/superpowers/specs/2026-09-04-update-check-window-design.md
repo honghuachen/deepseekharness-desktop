@@ -178,8 +178,10 @@ IPC 契约(`update:*` 前缀,风格对齐 `token-usage:*` / 插件管理器现�
 
 ## 明确不做的事(YAGNI)
 
-- 不做容器(壳)的自动下载安装(`electron-updater`)——当前未签名/未公证,
-  Windows/macOS 自动安装的工程量和现有基础设施不匹配,只做检测 + 引导手动下载。
+- ~~不做容器(壳)的自动下载安装(`electron-updater`)~~ **更新(同日晚些时候)**:
+  Windows 端已经接上 `electron-updater`(`win.verifyUpdateCodeSignature: false` 关闭签名校验,
+  绕开未签名的限制),见 `shell-auto-updater.js`。macOS 端 Squirrel.Mac 强制要求签名,
+  维持原判断——不做,只保留检测 + 引导手动下载。
 - 不新增"稳定版"这个 semver 概念或 dist-tag——"稳定版"在 UI 上等价于 npm `latest`。
 - 不在窗口里做"删除某个已下载的旧版本"之类的管理功能——沿用现有 `prune(keep=2)` 自动清理,
   只是保护名单里加上 `pinnedKernelVersion`。
