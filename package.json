@@ -8,11 +8,21 @@
   "type": "commonjs",
   "main": "src/main/main.js",
   "author": "dragonplus",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/honghuachen/deepseekharness-desktop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/honghuachen/deepseekharness-desktop/issues"
+  },
+  "homepage": "https://github.com/honghuachen/deepseekharness-desktop#readme",
   "scripts": {
     "start": "electron .",
     "fetch-tools": "node scripts/fetch-tools.mjs",
+    "test": "node scripts/badge-test.mjs && node scripts/plugin-guard-test.mjs && node scripts/test-plugin-update.mjs && node scripts/test-token-usage.mjs",
     "test:e2e": "node scripts/e2e-update-test.mjs",
     "test:plugin-update": "node scripts/test-plugin-update.mjs",
+    "test:token-usage": "node scripts/test-token-usage.mjs",
     "dist:dir": "npm run fetch-tools && electron-builder --dir -m -w",
     "dist": "npm run fetch-tools && electron-builder -m -w"
   },
