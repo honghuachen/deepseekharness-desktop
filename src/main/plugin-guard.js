@@ -136,9 +136,16 @@ function stripForeignInsertBlocks(text, removedNames) {
 
 function runPnpm(nodeBin, pnpmCjs, args, cwd, onLine) {
   return new Promise((resolve, reject) => {
+    const nodeDir = path.dirname(nodeBin);
+    const pathSep = process.platform === 'win32' ? ';' : ':';
     const child = spawn(nodeBin, [pnpmCjs, ...args], {
       cwd,
-      env: { ...process.env, npm_config_loglevel: 'error', CI: 'true' },
+      env: {
+        ...process.env,
+        PATH: nodeDir + pathSep + (process.env.PATH || ''),
+        npm_config_loglevel: 'error',
+        CI: 'true',
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let errTail = '';

@@ -135,6 +135,13 @@ async function main() {
     assert.deepEqual(lines, ['安装 0.1.2-rc.1']);
   });
 
+  await t('BUILD_ALLOWLIST 包含必要原生构建依赖 (fs-ext, koffi, node-pty 等)', async () => {
+    const { BUILD_ALLOWLIST } = require('../src/main/config.js');
+    assert(BUILD_ALLOWLIST.includes('fs-ext'), 'fs-ext 必须在 BUILD_ALLOWLIST 中以支持会话持久化');
+    assert(BUILD_ALLOWLIST.includes('node-pty'), 'node-pty 必须在 BUILD_ALLOWLIST 中');
+    assert(BUILD_ALLOWLIST.includes('koffi'), 'koffi 必须在 BUILD_ALLOWLIST 中');
+  });
+
   if (failed) {
     process.stdout.write(`\n共 ${failed} 项断言失败\n`);
     process.exit(1);

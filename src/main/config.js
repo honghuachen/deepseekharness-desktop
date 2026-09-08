@@ -16,6 +16,7 @@ const REGISTRY_LATEST_URL = `https://registry.npmjs.org/${DSH_PACKAGE_ENCODED}/l
 const BUILD_ALLOWLIST = [
   '@deepseek-ai/dsh-subprocess-local',
   '@google/genai',
+  'fs-ext',
   'koffi',
   'node-pty',
   'protobufjs',

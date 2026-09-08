@@ -74,9 +74,15 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
     if (picked.adjusted) log(`[runner] 端口 ${port} 被占用，改用 ${picked.port}`);
 
     log(`[runner] 启动 dsh web (${version}) @ ${url}`);
+    const nodeDir = path.dirname(nodeBin);
+    const pathSep = process.platform === 'win32' ? ';' : ':';
     child = spawn(nodeBin, [entry, 'web', '--no-open', '--host', '127.0.0.1', '--port', String(picked.port)], {
       cwd: vdir,
-      env: { ...process.env, ...envOverride },
+      env: {
+        ...process.env,
+        PATH: nodeDir + pathSep + (process.env.PATH || ''),
+        ...envOverride,
+      },
       detached: true, // 独立进程组，便于整体终止 cordis 派生的 worker
       stdio: ['ignore', 'pipe', 'pipe'],
     });

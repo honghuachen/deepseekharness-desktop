@@ -53,10 +53,13 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
 
   function runPnpm(args, cwd, onLine) {
     return new Promise((resolve, reject) => {
+      const nodeDir = path.dirname(nodeBin);
+      const pathSep = process.platform === 'win32' ? ';' : ':';
       const child = spawn(nodeBin, [pnpmCjs, ...args], {
         cwd,
         env: {
           ...process.env,
+          PATH: nodeDir + pathSep + (process.env.PATH || ''),
           PNPM_HOME: undefined,
           npm_config_loglevel: 'warn',
           npm_config_store_dir: paths.storeDir,
@@ -99,20 +102,38 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
     return `allowBuilds:\n${lines.join('\n')}\n`;
   }
 
+  const INSTALL_COMPLETE_MARKER = '.install-complete';
+
+  /** 检查版本是否已完整安装 */
+  function isVersionComplete(vdir) {
+    if (!fsSync.existsSync(path.join(vdir, PNPM_BIN_NAME))) return false;
+    return (
+      fsSync.existsSync(path.join(vdir, INSTALL_COMPLETE_MARKER)) ||
+      fsSync.existsSync(path.join(vdir, 'pnpm-lock.yaml'))
+    );
+  }
+
   /**
    * 安装指定版本到 versions/<v>/ 独立目录。
-   * 步骤：写 package.json + 预放行构建脚本 → pnpm add → 校验入口存在。
+   * 步骤：写 package.json + 预放行构建脚本 → pnpm add → 校验入口存在 → 写完成标记。
    */
   async function install(version, onLine = () => {}) {
     const vdir = paths.versionDir(version);
-    onLine(`准备目录 ${path.basename(vdir)} …`);
-    await fsPromises.mkdir(vdir, { recursive: true });
 
     // 幂等：已完整安装则跳过
-    if (fsSync.existsSync(path.join(vdir, PNPM_BIN_NAME))) {
+    if (isVersionComplete(vdir)) {
       onLine('该版本已存在且完整，跳过下载');
       return vdir;
     }
+
+    // 若存在残缺半成品目录，先清理避免残留坏状态
+    if (fsSync.existsSync(vdir)) {
+      onLine(`清理未完成的安装残留 ${path.basename(vdir)} …`);
+      await fsPromises.rm(vdir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    onLine(`准备目录 ${path.basename(vdir)} …`);
+    await fsPromises.mkdir(vdir, { recursive: true });
 
     const pkgJson = {
       name: 'dsh-runtime',
@@ -127,11 +148,22 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
     await fsPromises.writeFile(path.join(vdir, 'pnpm-workspace.yaml'), allowBuildsYaml());
 
     onLine(`正在下载 ${DSH_PACKAGE}@${version} 及其依赖 …`);
-    await runPnpm(['add', `${DSH_PACKAGE}@${version}`, '--store-dir=' + paths.storeDir], vdir, onLine);
+    try {
+      await runPnpm(['add', `${DSH_PACKAGE}@${version}`, '--store-dir=' + paths.storeDir], vdir, onLine);
+    } catch (err) {
+      await fsPromises.rm(vdir, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
 
     if (!fsSync.existsSync(path.join(vdir, PNPM_BIN_NAME))) {
+      await fsPromises.rm(vdir, { recursive: true, force: true }).catch(() => {});
       throw new Error(`安装后未找到 ${PNPM_BIN_NAME}，安装不完整`);
     }
+
+    await fsPromises.writeFile(
+      path.join(vdir, INSTALL_COMPLETE_MARKER),
+      JSON.stringify({ version, installedAt: new Date().toISOString() }) + '\n',
+    );
     onLine(`✓ ${version} 安装完成`);
     return vdir;
   }
@@ -140,7 +172,7 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
    *  Windows 优先 junction（无需管理员权限），受限环境回退指针文件。 */
   async function activate(version) {
     const target = paths.versionDir(version);
-    if (!fsSync.existsSync(path.join(target, PNPM_BIN_NAME))) {
+    if (!isVersionComplete(target)) {
       throw new Error(`无法激活 ${version}：目标目录不完整`);
     }
     const tmp = `${paths.currentLink}.tmp-${process.pid}-${Date.now()}`;

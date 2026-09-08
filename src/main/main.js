@@ -548,26 +548,39 @@ async function switchKernelVersion(version, { pin, onLine } = {}) {
   const dshHome = resolveDshHome();
   const wasRunning = runner?.isRunning();
   const previousVersion = activeVersion;
+  const previousPinned = settings.pinnedKernelVersion;
   if (wasRunning) await runner.stop();
 
   try {
     await kernelSwitcher.switchKernelVersion(version, { pin, onLine });
+    activeVersion = version;
+    await updater.prune(2, [activeVersion, settings.pinnedKernelVersion].filter(Boolean));
+    const { url } = await runner.start(activeVersion, settings.port, {
+      envOverride: { DSH_HOME: dshHome },
+    });
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(url).catch(() => {});
+    return url;
   } catch (err) {
-    if (wasRunning && previousVersion) {
-      await runner
-        .start(previousVersion, settings.port, { envOverride: { DSH_HOME: dshHome } })
-        .catch(() => {});
+    logLine(`[switch] 切换到 ${version} 失败：${err.message}，正在回滚…`);
+    if (previousVersion) {
+      activeVersion = previousVersion;
+      settings.pinnedKernelVersion = previousPinned;
+      saveSettings(paths, settings);
+      await updater.activate(previousVersion).catch(() => {});
+      if (wasRunning) {
+        const rollbackResult = await runner
+          .start(previousVersion, settings.port, { envOverride: { DSH_HOME: dshHome } })
+          .catch((e) => {
+            logLine(`[switch] 回滚启动旧版本 ${previousVersion} 也失败：${e.message}`);
+            return null;
+          });
+        if (rollbackResult && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.loadURL(rollbackResult.url).catch(() => {});
+        }
+      }
     }
-    throw err;
+    throw new Error(`切换到 ${version} 失败（已回滚至 ${previousVersion || '原版本'}）：${err.message}`);
   }
-
-  activeVersion = version;
-  await updater.prune(2, [activeVersion, settings.pinnedKernelVersion].filter(Boolean));
-  const { url } = await runner.start(activeVersion, settings.port, {
-    envOverride: { DSH_HOME: dshHome },
-  });
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(url).catch(() => {});
-  return url;
 }
 
 /** 菜单动作：打开检查更新窗口（容器+内核） */
