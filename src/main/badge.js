@@ -16,6 +16,7 @@ const fsSync = require('node:fs');
 const fsPromises = require('node:fs/promises');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { SESSION_FILE_RE } = require('./token-usage/scanner');
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -211,7 +212,7 @@ async function listSessionLogs(root) {
       if (ent.isDirectory()) {
         // eslint-disable-next-line no-await-in-loop
         await walk(full, depth + 1);
-      } else if (/^session\.jsonl(\.zstd)?$/.test(ent.name)) {
+      } else if (SESSION_FILE_RE.test(ent.name)) {
         out.push(full);
       }
     }

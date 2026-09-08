@@ -3,13 +3,14 @@
 /**
  * 递归找出 DeepSeek Harness 的会话日志文件（<dshHome>/sessions 下）。
  * 同时兼容压缩（.zstd）与未压缩（纯 .jsonl）两种落盘形态，
+ * 以及内核升级后可能出现的 session.vN.jsonl(.zstd) 版本化命名，
  * 与 badge.js 的 listSessionLogs 保持一致的匹配规则。
  */
 
 const fsPromises = require('node:fs/promises');
 const path = require('node:path');
 
-const SESSION_FILE_RE = /^session\.jsonl(\.zstd)?$/;
+const SESSION_FILE_RE = /^session(\.v\d+)?\.jsonl(\.zstd)?$/;
 
 async function findSessionFiles(root) {
   const results = [];
