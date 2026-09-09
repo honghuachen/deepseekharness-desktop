@@ -299,59 +299,187 @@ async function checkProfileUpdates(profileDir, { registry, log = () => {} } = {}
 }
 
 /**
- * 把单个第三方依赖升级到指定版本（默认 latest）。
- * 步骤：备份 package.json → 写新 range → pnpm install 收敛 node_modules。
- * @returns {Promise<{name, from, to, ok, error?:string}>}
+ * 批量升级一个 profile 内的多个第三方依赖。
+ * 步骤：备份 package.json → 为各插件写新 range（若未指定或 latest 则向 registry 解析实际版本）
+ *      → 单次 pnpm install 收敛 node_modules → 校验各包实际版本并写回 package.json。
+ * @param {string} profileDir profile 目录
+ * @param {Array<{name: string, target?: string}>} items 待升级插件列表
+ * @param {object} opts {nodeBin, pnpmCjs, log, registry}
+ * @returns {Promise<{report: Array<{name, from, to, ok, error?:string}>, anyChanged: boolean}>}
  */
-async function updatePlugin(profileDir, name, { targetVersion, nodeBin, pnpmCjs, log = () => {} } = {}) {
-  if (!name) return { name, ok: false, error: '缺少包名' };
+async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => {}, registry } = {}) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { report: [], anyChanged: false };
+  }
   const pkgFile = path.join(profileDir, 'package.json');
   const pkg = readJson(pkgFile);
-  if (!pkg) return { name, ok: false, error: 'profile 不存在或 package.json 解析失败' };
-  if (isOfficial(name)) return { name, ok: false, error: `官方包 ${name} 不可通过此通道更新` };
-  const oldRange = pkg.dependencies?.[name];
-  if (!oldRange) return { name, ok: false, error: `${name} 不在该 profile 的 dependencies 中` };
+  if (!pkg) {
+    return {
+      report: items.map((i) => ({ name: i?.name || 'unknown', ok: false, error: 'profile 不存在或 package.json 解析失败' })),
+      anyChanged: false,
+    };
+  }
 
-  const target = targetVersion || 'latest';
+  const reg = registry || createRegistryChecker({ log });
+  const validItems = [];
+  const report = [];
+
+  for (const item of items) {
+    const name = item?.name;
+    if (!name) continue;
+    if (isOfficial(name)) {
+      report.push({ name, ok: false, error: `官方包 ${name} 不可通过此通道更新` });
+      continue;
+    }
+    const oldRange = pkg.dependencies?.[name];
+    if (!oldRange) {
+      report.push({ name, ok: false, error: `${name} 不在该 profile 的 dependencies 中` });
+      continue;
+    }
+
+    let target = item.target || 'latest';
+    // 若未指定或为 latest，尝试向 registry 查询最新版本号
+    if (target === 'latest') {
+      try {
+        const latestVer = await reg.fetchLatest(name);
+        if (latestVer) target = latestVer;
+      } catch {}
+    }
+
+    // 规范写入范围：若有具体版本且不以 ^ 开头，规范为 ^x.y.z；若仍为 latest 则保留
+    const targetRange = target === 'latest' ? 'latest' : (target.startsWith('^') ? target : `^${target}`);
+    validItems.push({ name, oldRange, target, targetRange });
+  }
+
+  if (validItems.length === 0) {
+    return { report, anyChanged: false };
+  }
+
   const backupDir = path.join(profileDir, `.sanitized-backup-${Date.now()}`);
   await fsPromises.mkdir(backupDir, { recursive: true });
   await fsPromises.copyFile(pkgFile, path.join(backupDir, 'package.json'));
 
-  pkg.dependencies[name] = target === 'latest' ? 'latest' : target;
+  for (const v of validItems) {
+    pkg.dependencies[v.name] = v.targetRange;
+    log(`[guard] ${path.basename(profileDir)}: ${v.name} ${v.oldRange} → ${v.targetRange}`);
+  }
   await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
-  log(`[guard] ${path.basename(profileDir)}: ${name} ${oldRange} → ${pkg.dependencies[name]}`);
 
   if (!nodeBin || !pnpmCjs) {
-    return { name, from: oldRange, to: pkg.dependencies[name], ok: false, error: '缺少 nodeBin/pnpmCjs，未实际执行 pnpm install' };
+    for (const v of validItems) {
+      report.push({
+        name: v.name,
+        from: v.oldRange,
+        to: v.targetRange,
+        ok: false,
+        error: '缺少 nodeBin/pnpmCjs，未实际执行 pnpm install',
+      });
+    }
+    return { report, anyChanged: false };
   }
+
   const nmDir = path.join(profileDir, 'node_modules');
   if (!fsSync.existsSync(nmDir)) {
-    return { name, from: oldRange, to: pkg.dependencies[name], ok: false, error: 'profile 无 node_modules，无法执行 pnpm install' };
+    for (const v of validItems) {
+      report.push({
+        name: v.name,
+        from: v.oldRange,
+        to: v.targetRange,
+        ok: false,
+        error: 'profile 无 node_modules，无法执行 pnpm install',
+      });
+    }
+    return { report, anyChanged: false };
   }
+
   try {
     await runPnpm(nodeBin, pnpmCjs, ['install', '--no-frozen-lockfile'], profileDir, (l) => log(`[guard]   ${l}`));
-    // pnpm install 不会把 package.json 里的 "latest" 改写成具体版本号，
-    // 需要从安装结果里读出实际版本，重新规范为 ^x.y.z，否则 range 会永久留着字面量 "latest"
-    const refreshed = readJson(pkgFile);
-    let finalRange = refreshed?.dependencies?.[name] ?? pkg.dependencies[name];
-    if (finalRange === 'latest' || finalRange === target) {
-      const installed = readJson(path.join(profileDir, 'node_modules', name, 'package.json'));
+    const refreshed = readJson(pkgFile) || pkg;
+    let pkgModified = false;
+
+    for (const v of validItems) {
+      const installed = readJson(path.join(profileDir, 'node_modules', v.name, 'package.json'));
+      let finalRange = refreshed?.dependencies?.[v.name] ?? v.targetRange;
       if (installed?.version && refreshed?.dependencies) {
         finalRange = `^${installed.version}`;
-        refreshed.dependencies[name] = finalRange;
-        await fsPromises.writeFile(pkgFile, JSON.stringify(refreshed, null, 2) + '\n');
+        refreshed.dependencies[v.name] = finalRange;
+        pkgModified = true;
+      }
+
+      // 验证版本是否真正发生变更（排除由于 lockfile 锁定未更新并写回旧版的情形）
+      if (installed?.version && finalRange === v.oldRange) {
+        report.push({
+          name: v.name,
+          from: v.oldRange,
+          to: finalRange,
+          ok: false,
+          error: `已装版本未提升（仍为 ${v.oldRange}），更新未生效`,
+        });
+      } else {
+        report.push({
+          name: v.name,
+          from: v.oldRange,
+          to: finalRange,
+          ok: true,
+        });
       }
     }
-    return { name, from: oldRange, to: finalRange, ok: true };
+
+    if (pkgModified) {
+      await fsPromises.writeFile(pkgFile, JSON.stringify(refreshed, null, 2) + '\n');
+    }
+
+    const anyChanged = report.some((r) => r.ok && r.from !== r.to);
+    return { report, anyChanged };
   } catch (err) {
     // 失败回滚 package.json
     try {
       await fsPromises.copyFile(path.join(backupDir, 'package.json'), pkgFile);
     } catch {}
     const error = String(err.message || err);
-    log(`[guard]   ✗ ${path.basename(profileDir)}: ${name} 更新失败：${error}`);
-    return { name, from: oldRange, to: pkg.dependencies[name], ok: false, error };
+    log(`[guard]   ✗ ${path.basename(profileDir)}: 批量更新失败：${error}`);
+
+    // 若多个项批量更新失败，尝试逐个单独重试
+    if (validItems.length > 1) {
+      log(`[guard]   ${path.basename(profileDir)}: 降级为逐个单包更新…`);
+      for (const v of validItems) {
+        try {
+          const r = await updatePlugin(profileDir, v.name, {
+            targetVersion: v.target,
+            nodeBin,
+            pnpmCjs,
+            log,
+            registry: reg,
+          });
+          report.push(r);
+        } catch (e2) {
+          report.push({ name: v.name, from: v.oldRange, to: v.targetRange, ok: false, error: String(e2.message || e2) });
+        }
+      }
+      const anyChanged = report.some((r) => r.ok && r.from !== r.to);
+      return { report, anyChanged };
+    }
+
+    for (const v of validItems) {
+      report.push({ name: v.name, from: v.oldRange, to: v.targetRange, ok: false, error });
+    }
+    return { report, anyChanged: false };
   }
+}
+
+/**
+ * 把单个第三方依赖升级到指定版本（默认 latest）。
+ * 步骤：备份 package.json → 写新 range → pnpm install 收敛 node_modules。
+ * @returns {Promise<{name, from, to, ok, error?:string}>}
+ */
+async function updatePlugin(profileDir, name, { targetVersion, nodeBin, pnpmCjs, log = () => {}, registry } = {}) {
+  const { report } = await updatePlugins(profileDir, [{ name, target: targetVersion }], {
+    nodeBin,
+    pnpmCjs,
+    log,
+    registry,
+  });
+  return report[0] || { name, ok: false, error: '未知错误' };
 }
 
 /**
@@ -454,6 +582,7 @@ module.exports = {
   createRegistryChecker,
   checkProfileUpdates,
   updatePlugin,
+  updatePlugins,
   compareRangeToLatest,
   CANONICAL_PKG,
 };

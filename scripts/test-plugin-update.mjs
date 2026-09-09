@@ -25,6 +25,7 @@ const {
   compareRangeToLatest,
   createRegistryChecker,
   updatePlugin,
+  updatePlugins,
   checkProfileUpdates,
   isOfficial,
 } = guard;
@@ -180,7 +181,7 @@ async function main() {
     const backups = fs.readdirSync(dir).filter((n) => n.startsWith('.sanitized-backup-'));
     assert.equal(backups.length, 1);
   });
-  await t('成功路径：pnpm 退出 0，package.json range 已更新', async () => {
+  await t('成功路径：指定版本号时 range 规范为 ^x.y.z', async () => {
     const dir = tmpProfile();
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
       name: 'demo2',
@@ -192,14 +193,93 @@ async function main() {
     const fakePnpm = path.join(dir, 'fake-pnpm.cjs');
     fs.writeFileSync(fakePnpm, "process.exit(0);\n");
     const result = await updatePlugin(dir, 'demo-pkg', {
-      targetVersion: 'latest',
+      targetVersion: '0.9.0',
       nodeBin: fakeNode,
       pnpmCjs: fakePnpm,
       log: () => {},
     });
     assert.equal(result.ok, true);
+    assert.equal(result.to, '^0.9.0');
     const after = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
-    assert.equal(after.dependencies['demo-pkg'], 'latest');
+    assert.equal(after.dependencies['demo-pkg'], '^0.9.0');
+  });
+  await t('成功路径：从 node_modules 读出安装版本规范为 ^x.y.z', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo2-nm',
+      private: true,
+      dependencies: { 'demo-pkg': '^0.8.1' },
+    }, null, 2) + '\n');
+    fs.mkdirSync(path.join(dir, 'node_modules', 'demo-pkg'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'demo-pkg', 'package.json'), JSON.stringify({ version: '1.2.3' }));
+    const fakeNode = process.execPath;
+    const fakePnpm = path.join(dir, 'fake-pnpm.cjs');
+    fs.writeFileSync(fakePnpm, "process.exit(0);\n");
+    const result = await updatePlugin(dir, 'demo-pkg', {
+      targetVersion: '1.2.3',
+      nodeBin: fakeNode,
+      pnpmCjs: fakePnpm,
+      log: () => {},
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.from, '^0.8.1');
+    assert.equal(result.to, '^1.2.3');
+  });
+  await t('安装后版本未发生提升时判定为未生效', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo-stuck',
+      private: true,
+      dependencies: { 'demo-pkg': '^0.8.1' },
+    }, null, 2) + '\n');
+    fs.mkdirSync(path.join(dir, 'node_modules', 'demo-pkg'), { recursive: true });
+    // node_modules 里仍然是 0.8.1（模拟 pnpm 因 lockfile 满足未做任何升级）
+    fs.writeFileSync(path.join(dir, 'node_modules', 'demo-pkg', 'package.json'), JSON.stringify({ version: '0.8.1' }));
+    const fakeNode = process.execPath;
+    const fakePnpm = path.join(dir, 'fake-pnpm.cjs');
+    fs.writeFileSync(fakePnpm, "process.exit(0);\n");
+    const result = await updatePlugin(dir, 'demo-pkg', {
+      targetVersion: 'latest',
+      nodeBin: fakeNode,
+      pnpmCjs: fakePnpm,
+      log: () => {},
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /未提升/);
+    const after = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.equal(after.dependencies['demo-pkg'], '^0.8.1');
+  });
+  await t('updatePlugins 批量升级多个依赖', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo-batch',
+      private: true,
+      dependencies: { 'pkg-a': '^1.0.0', 'pkg-b': '^2.0.0' },
+    }, null, 2) + '\n');
+    fs.mkdirSync(path.join(dir, 'node_modules', 'pkg-a'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'node_modules', 'pkg-b'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'pkg-a', 'package.json'), JSON.stringify({ version: '1.1.0' }));
+    fs.writeFileSync(path.join(dir, 'node_modules', 'pkg-b', 'package.json'), JSON.stringify({ version: '2.1.0' }));
+    const fakeNode = process.execPath;
+    const fakePnpm = path.join(dir, 'fake-pnpm.cjs');
+    fs.writeFileSync(fakePnpm, "process.exit(0);\n");
+    const { report, anyChanged } = await updatePlugins(dir, [
+      { name: 'pkg-a', target: '1.1.0' },
+      { name: 'pkg-b', target: '2.1.0' },
+    ], {
+      nodeBin: fakeNode,
+      pnpmCjs: fakePnpm,
+      log: () => {},
+    });
+    assert.equal(anyChanged, true);
+    assert.equal(report.length, 2);
+    assert.equal(report[0].ok, true);
+    assert.equal(report[0].to, '^1.1.0');
+    assert.equal(report[1].ok, true);
+    assert.equal(report[1].to, '^2.1.0');
+    const after = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.equal(after.dependencies['pkg-a'], '^1.1.0');
+    assert.equal(after.dependencies['pkg-b'], '^2.1.0');
   });
   await t('官方包拒绝升级', async () => {
     const dir = tmpProfile();

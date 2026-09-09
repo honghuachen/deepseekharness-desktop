@@ -15,6 +15,7 @@ const {
   createRegistryChecker,
   checkProfileUpdates,
   updatePlugin,
+  updatePlugins,
 } = require('./plugin-guard');
 
 let win = null; // 单例窗口
@@ -216,13 +217,15 @@ function registerIpc(context) {
       }
       try {
         const nodeBin = context.getNodeBin ? await context.getNodeBin() : undefined;
+        const reg = getRegistry(context.log);
         const result = await updatePlugin(dir, name, {
           targetVersion: target,
           nodeBin,
           pnpmCjs: context.pnpmCjs,
           log: context.log,
+          registry: reg,
         });
-        if (result.ok) invalidateUpdatesCache(context.dshHome(), profile, [name]);
+        if (result.ok && result.from !== result.to) invalidateUpdatesCache(context.dshHome(), profile, [name]);
         return { ...result, profile, profiles: buildInventory(context.dshHome()) };
       } catch (err) {
         context.log?.(`[pm] 更新失败 ${profile}/${name}: ${err.message}`);
@@ -230,30 +233,36 @@ function registerIpc(context) {
       }
     }
     if (cmd === 'updateAll') {
-      // payload: { profile: string, names: string[] } —— 逐个 update，收集报告
-      const { profile, names } = payload ?? {};
-      if (!profile || !Array.isArray(names) || names.length === 0) {
+      // payload: { profile: string, names?: (string | {name, target})[], targets?: Array<{name, target}> }
+      const { profile, names, targets } = payload ?? {};
+      const rawList = Array.isArray(targets) ? targets : Array.isArray(names) ? names : [];
+      if (!profile || rawList.length === 0) {
         throw new Error('缺少 profile 或 names');
       }
       const dir = path.join(context.dshHome(), 'profiles', profile);
       if (!fsSync.existsSync(path.join(dir, 'package.json'))) {
         return { report: [], error: 'profile 不存在' };
       }
-      const report = [];
+      const items = rawList
+        .map((item) => {
+          if (typeof item === 'string') return { name: item, target: 'latest' };
+          if (item && typeof item === 'object' && item.name) {
+            return { name: item.name, target: item.target || 'latest' };
+          }
+          return null;
+        })
+        .filter(Boolean);
+
       const nodeBin = context.getNodeBin ? await context.getNodeBin() : undefined;
-      for (const n of names) {
-        try {
-          const r = await updatePlugin(dir, n, {
-            nodeBin,
-            pnpmCjs: context.pnpmCjs,
-            log: context.log,
-          });
-          report.push(r);
-        } catch (err) {
-          report.push({ name: n, ok: false, error: String(err.message || err) });
-        }
-      }
-      const okNames = report.filter((r) => r.ok).map((r) => r.name);
+      const reg = getRegistry(context.log);
+      const { report } = await updatePlugins(dir, items, {
+        nodeBin,
+        pnpmCjs: context.pnpmCjs,
+        log: context.log,
+        registry: reg,
+      });
+
+      const okNames = report.filter((r) => r.ok && r.from !== r.to).map((r) => r.name);
       if (okNames.length) invalidateUpdatesCache(context.dshHome(), profile, okNames);
       return { report, profile, profiles: buildInventory(context.dshHome()) };
     }

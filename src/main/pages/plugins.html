@@ -431,17 +431,23 @@ async function updateAllGlobal() {
   render();
 }
 
-/** 一键把某 profile 的全部「有新版」插件升级到最新版（串行） */
+/** 一键把某 profile 的全部「有新版」插件升级到最新版 */
 async function updateAll(profile) {
   const m = getOrCreateMap(profile);
-  const names = [];
-  for (const [k, s] of m) if (s.status === 'outdated') names.push(k);
-  if (names.length === 0) return;
-  for (const k of names) m.set(k, { ...m.get(k), loading: true, error: null });
+  const items = [];
+  for (const [k, s] of m) {
+    if (s.status === 'outdated') {
+      items.push({ name: k, target: s.latest || 'latest' });
+    }
+  }
+  if (items.length === 0) return;
+  for (const item of items) {
+    m.set(item.name, { ...m.get(item.name), loading: true, error: null });
+  }
   render();
   const results = [];
   try {
-    const res = await window.pluginAPI.updateAll(profile, names);
+    const res = await window.pluginAPI.updateAll(profile, items);
     const report = res.report ?? [];
     for (const r of report) {
       results.push(r);
