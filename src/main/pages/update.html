@@ -140,14 +140,30 @@ function renderShellCard() {
       if (shellUpdate.status === 'downloading') {
         autoPart = `<span class="row"><span class="spinner"></span> 下载中 ${shellUpdate.percent}%…</span>`;
       } else if (shellUpdate.status === 'downloaded') {
-        autoPart = `<button class="primary" id="shellInstall">重启并安装</button>`;
+        autoPart = `<button class="primary" id="shellInstall">重启并覆盖安装</button>`;
       } else {
-        autoPart = `<button class="primary" id="shellAutoDownload">下载并安装</button>`;
+        autoPart = `<button class="primary" id="shellAutoDownload">下载更新</button>`;
       }
     }
-    const errHtml = shellUpdate.error
-      ? `<div class="error-box">${esc(shellUpdate.error)}</div>`
-      : '';
+    let errHtml = '';
+    if (shellUpdate.error) {
+      const errStr = String(shellUpdate.error);
+      const isNetReset = /ERR_CONNECTION_RESET|ECONNRESET|ETIMEDOUT|timeout|ERR_CONNECTION_TIMED_OUT|ERR_NAME_NOT_RESOLVED|socket hang up/i.test(errStr);
+      const tipHtml = isNetReset
+        ? `<div class="tip" style="margin-top:6px;font-size:11px;opacity:.85;line-height:1.5">
+            <b>连接受限提示：</b>国内网络访问 GitHub Release 安装包易受干扰导致连接重置。<br>
+            • 建议 1：点击上方<b>「前往下载页」</b>在浏览器中直接下载安装包覆盖安装（无需卸载，配置与数据完全保留）；<br>
+            • 建议 2：开启代理软件（推荐开启 <b>TUN 虚拟网卡模式</b>）后点击「重试下载」。
+          </div>`
+        : '';
+      errHtml = `<div class="error-box">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span><b>下载失败：</b>${esc(errStr)}</span>
+          <button class="retry" id="shellDownloadRetry">重试下载</button>
+        </div>
+        ${tipHtml}
+      </div>`;
+    }
     body = `<div class="row">当前版本 ${cur} · <span class="muted">发现新版本</span> <b>v${esc(s.latest.latestTag)}</b></div>
       <div class="row" style="margin-top:8px">
         ${autoPart}
@@ -159,11 +175,19 @@ function renderShellCard() {
   }
   $('#shellCard').innerHTML = `<h2>容器（壳应用）</h2>${body}`;
   $('#shellRetry')?.addEventListener('click', refresh);
+  $('#shellDownloadRetry')?.addEventListener('click', startShellAutoDownload);
   $('#shellDownloadPage')?.addEventListener('click', () => {
     if (s.latest?.htmlUrl) window.updateAPI.openExternal(s.latest.htmlUrl);
   });
   $('#shellAutoDownload')?.addEventListener('click', startShellAutoDownload);
-  $('#shellInstall')?.addEventListener('click', () => window.updateAPI.installShellUpdate());
+  $('#shellInstall')?.addEventListener('click', () => {
+    const btn = $('#shellInstall');
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span> 正在退出并自动安装…';
+    }
+    window.updateAPI.installShellUpdate();
+  });
 }
 
 async function startShellAutoDownload() {
