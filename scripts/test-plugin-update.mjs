@@ -281,6 +281,40 @@ async function main() {
     assert.equal(after.dependencies['pkg-a'], '^1.1.0');
     assert.equal(after.dependencies['pkg-b'], '^2.1.0');
   });
+  await t('updatePlugins 传递 dangerously-allow-all-builds 与 strict-dep-builds 参数与环境变量', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo-pnpm-args',
+      private: true,
+      dependencies: { 'pkg-c': '^1.0.0' },
+    }, null, 2) + '\n');
+    fs.mkdirSync(path.join(dir, 'node_modules', 'pkg-c'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'pkg-c', 'package.json'), JSON.stringify({ version: '1.2.0' }));
+    const fakeNode = process.execPath;
+    const fakePnpm = path.join(dir, 'fake-pnpm-inspect.cjs');
+    fs.writeFileSync(fakePnpm, `
+      const fs = require('fs');
+      fs.writeFileSync(${JSON.stringify(path.join(dir, 'captured.json'))}, JSON.stringify({
+        argv: process.argv.slice(2),
+        env: {
+          dangerously: process.env.PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS,
+          strict: process.env.PNPM_CONFIG_STRICT_DEP_BUILDS,
+        }
+      }));
+      process.exit(0);
+    `);
+    const { report } = await updatePlugins(dir, [{ name: 'pkg-c', target: '1.2.0' }], {
+      nodeBin: fakeNode,
+      pnpmCjs: fakePnpm,
+      log: () => {},
+    });
+    assert.equal(report[0].ok, true);
+    const captured = JSON.parse(fs.readFileSync(path.join(dir, 'captured.json'), 'utf8'));
+    assert.equal(captured.argv.includes('--config.dangerously-allow-all-builds=true'), true);
+    assert.equal(captured.argv.includes('--config.strict-dep-builds=false'), true);
+    assert.equal(captured.env.dangerously, 'true');
+    assert.equal(captured.env.strict, 'false');
+  });
   await t('官方包拒绝升级', async () => {
     const dir = tmpProfile();
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({

@@ -17,6 +17,7 @@
   .card {
     background: #fff; border-radius: 10px; padding: 10px 14px; margin-bottom: 14px;
     box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    overflow-x: auto;
   }
   h2 {
     font-size: 13px; margin: 4px 0 2px;
@@ -31,10 +32,24 @@
   .profile-actions .mini:disabled { opacity:.4; cursor: not-allowed; }
   table { width: 100%; border-collapse: collapse; margin-top: 6px; }
   td { padding: 5px 6px; border-top: 1px solid rgba(128,128,128,.15); vertical-align: middle; }
-  td.name { font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-all; }
-  td.range { opacity:.6; white-space: nowrap; font-size:12px; }
-  td.refs { white-space: nowrap; font-size: 11px; }
-  td.upd { white-space: nowrap; font-size: 11px; width: 1%; }
+  td.chk { width: 28px; text-align: center; }
+  td.name {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px;
+    min-width: 200px;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+  td.range {
+    opacity: .6;
+    font-size: 12px;
+    max-width: 220px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  td.refs { white-space: nowrap; font-size: 11px; width: 1%; }
+  td.upd { white-space: nowrap; font-size: 11px; width: 1%; text-align: right; }
   .tag { display:inline-block; padding:0 7px; border-radius:9px; font-size:11px; margin-right:4px; }
   .tag.official { background: rgba(77,107,254,.14); color:#3b62f6; }
   .tag.third { background: rgba(255,159,10,.16); color:#c77700; }
@@ -167,17 +182,17 @@ function renderRow(profile, item) {
   const removable = !item.official;
   const key = item.rawName || item.name;
   if (!removable && item.insertOnly) {
-    return `<tr class="info"><td></td><td class="name">${esc(item.name)}</td>
-      <td class="range">${esc(item.range)}</td>
+    return `<tr class="info"><td class="chk"></td><td class="name" title="${esc(item.name)}">${esc(item.name)}</td>
+      <td class="range" title="${esc(item.range)}">${esc(item.range)}</td>
       <td class="refs"><span class="tag official">官方配置</span>${refsTags(item)}</td>
       <td class="upd"></td></tr>`;
   }
   const checked = selected.get(profile)?.has(key) ? 'checked' : '';
   const updCell = removable ? `${statusTagFor(item, profile)} ${updateBtnFor(item, profile)}` : '';
   return `<tr>
-    <td style="width:26px">${removable ? `<input type="checkbox" data-profile="${esc(profile)}" data-key="${esc(key)}" ${checked} onchange="onToggle(this)">` : ''}</td>
-    <td class="name">${esc(item.name)}</td>
-    <td class="range">${esc(item.range)}</td>
+    <td class="chk">${removable ? `<input type="checkbox" data-profile="${esc(profile)}" data-key="${esc(key)}" ${checked} onchange="onToggle(this)">` : ''}</td>
+    <td class="name" title="${esc(item.name)}">${esc(item.name)}</td>
+    <td class="range" title="${esc(item.range)}">${esc(item.range)}</td>
     <td class="refs">${item.official ? '<span class="tag official">官方</span>' : '<span class="tag third">第三方</span>'}${refsTags(item)}</td>
     <td class="upd">${updCell}</td>
   </tr>`;

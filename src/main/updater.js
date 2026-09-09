@@ -64,6 +64,10 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
           npm_config_loglevel: 'warn',
           npm_config_store_dir: paths.storeDir,
           CI: 'true', // 关闭交互提示
+          pnpm_config_dangerously_allow_all_builds: 'true',
+          pnpm_config_strict_dep_builds: 'false',
+          PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS: 'true',
+          PNPM_CONFIG_STRICT_DEP_BUILDS: 'false',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -149,7 +153,13 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
 
     onLine(`正在下载 ${DSH_PACKAGE}@${version} 及其依赖 …`);
     try {
-      await runPnpm(['add', `${DSH_PACKAGE}@${version}`, '--store-dir=' + paths.storeDir], vdir, onLine);
+      await runPnpm([
+        'add',
+        `${DSH_PACKAGE}@${version}`,
+        '--store-dir=' + paths.storeDir,
+        '--config.dangerously-allow-all-builds=true',
+        '--config.strict-dep-builds=false',
+      ], vdir, onLine);
     } catch (err) {
       await fsPromises.rm(vdir, { recursive: true, force: true }).catch(() => {});
       throw err;

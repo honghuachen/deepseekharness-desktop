@@ -145,6 +145,10 @@ function runPnpm(nodeBin, pnpmCjs, args, cwd, onLine) {
         PATH: nodeDir + pathSep + (process.env.PATH || ''),
         npm_config_loglevel: 'error',
         CI: 'true',
+        pnpm_config_dangerously_allow_all_builds: 'true',
+        pnpm_config_strict_dep_builds: 'false',
+        PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS: 'true',
+        PNPM_CONFIG_STRICT_DEP_BUILDS: 'false',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -393,7 +397,18 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
   }
 
   try {
-    await runPnpm(nodeBin, pnpmCjs, ['install', '--no-frozen-lockfile'], profileDir, (l) => log(`[guard]   ${l}`));
+    await runPnpm(
+      nodeBin,
+      pnpmCjs,
+      [
+        'install',
+        '--no-frozen-lockfile',
+        '--config.dangerously-allow-all-builds=true',
+        '--config.strict-dep-builds=false',
+      ],
+      profileDir,
+      (l) => log(`[guard]   ${l}`),
+    );
     const refreshed = readJson(pkgFile) || pkg;
     let pkgModified = false;
 
@@ -532,7 +547,18 @@ async function removePluginsFromProfile(profileDir, names, { nodeBin, pnpmCjs, l
     }
   } else if (nodeBin && pnpmCjs && fsSync.existsSync(nmDir)) {
     log(`[guard] ${path.basename(profileDir)}: 运行 pnpm install 收敛剩余依赖 …`);
-    await runPnpm(nodeBin, pnpmCjs, ['install', '--no-frozen-lockfile'], profileDir, (l) => log(`[guard]   ${l}`));
+    await runPnpm(
+      nodeBin,
+      pnpmCjs,
+      [
+        'install',
+        '--no-frozen-lockfile',
+        '--config.dangerously-allow-all-builds=true',
+        '--config.strict-dep-builds=false',
+      ],
+      profileDir,
+      (l) => log(`[guard]   ${l}`),
+    );
     reconciled = 'reinstall';
   }
 

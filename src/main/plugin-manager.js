@@ -288,10 +288,10 @@ function openPluginManager({ dshHome, pnpmCjs, getNodeBin, log = () => {} } = {}
   });
 
   win = new BrowserWindow({
-    width: 780,
-    height: 640,
-    minWidth: 620,
-    minHeight: 460,
+    width: 900,
+    height: 680,
+    minWidth: 680,
+    minHeight: 480,
     title: '管理第三方插件',
     autoHideMenuBar: true,
     webPreferences: {
