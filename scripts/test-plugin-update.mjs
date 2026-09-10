@@ -24,6 +24,9 @@ const guard = require(path.join(__dirname, '..', 'src', 'main', 'plugin-guard.js
 const {
   compareRangeToLatest,
   createRegistryChecker,
+  createGitHubChecker,
+  parseGitHubSpec,
+  getInstalledGitCommit,
   updatePlugin,
   updatePlugins,
   checkProfileUpdates,
@@ -410,6 +413,212 @@ async function main() {
     assert.equal(isOfficial('@deepseek-ai/dsh-base'), true);
     assert.equal(isOfficial('lodash'), false);
     assert.equal(isOfficial('@mtensor/memos'), false);
+  });
+
+  process.stdout.write('parseGitHubSpec:\n');
+  await t('解析各类 GitHub 依赖规格', () => {
+    assert.deepEqual(parseGitHubSpec('github:foo/bar'), { owner: 'foo', repo: 'bar', ref: 'HEAD' });
+    assert.deepEqual(parseGitHubSpec('github:foo/bar#main'), { owner: 'foo', repo: 'bar', ref: 'main' });
+    assert.deepEqual(parseGitHubSpec('github:kusesad-1122/dsh-context-compactor'), { owner: 'kusesad-1122', repo: 'dsh-context-compactor', ref: 'HEAD' });
+    assert.deepEqual(parseGitHubSpec('git+https://github.com/foo/bar.git'), { owner: 'foo', repo: 'bar', ref: 'HEAD' });
+    assert.deepEqual(parseGitHubSpec('https://github.com/foo/bar#v1.0.0'), { owner: 'foo', repo: 'bar', ref: 'v1.0.0' });
+    assert.deepEqual(parseGitHubSpec('git@github.com:foo/bar.git'), { owner: 'foo', repo: 'bar', ref: 'HEAD' });
+    assert.equal(parseGitHubSpec('^1.0.0'), null);
+    assert.equal(parseGitHubSpec('lodash'), null);
+    assert.equal(parseGitHubSpec(''), null);
+  });
+
+  process.stdout.write('getInstalledGitCommit:\n');
+  await t('从 lockfile 提取已装 commit SHA', () => {
+    const dir = tmpProfile();
+    const fakeLock = `
+importers:
+  .:
+    dependencies:
+      dsh-history-rewind:
+        specifier: github:DDDonzy/dsh-history-rewind
+        version: https://codeload.github.com/DDDonzy/dsh-history-rewind/tar.gz/d6e583c870956db0454a75fd969663d3cbde1412
+      regular-pkg:
+        specifier: ^1.0.0
+        version: 1.0.0
+packages:
+  dsh-history-rewind@https://codeload.github.com/DDDonzy/dsh-history-rewind/tar.gz/d6e583c870956db0454a75fd969663d3cbde1412:
+    resolution: {tarball: https://codeload.github.com/DDDonzy/dsh-history-rewind/tar.gz/d6e583c870956db0454a75fd969663d3cbde1412}
+`;
+    fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), fakeLock);
+    assert.equal(getInstalledGitCommit(dir, 'dsh-history-rewind'), 'd6e583c870956db0454a75fd969663d3cbde1412');
+    assert.equal(getInstalledGitCommit(dir, 'regular-pkg'), null);
+    assert.equal(getInstalledGitCommit(dir, 'non-existent'), null);
+  });
+
+  process.stdout.write('createGitHubChecker:\n');
+  await t('Smart Git HTTP 解析 HEAD sha 与 tag', async () => {
+    const checker = createGitHubChecker();
+    const orig = global.fetch;
+    const fakeGitUploadPack = `001e# service=git-upload-pack
+00000159d6e583c870956db0454a75fd969663d3cbde1412 HEAD symref=HEAD:refs/heads/main
+003dd6e583c870956db0454a75fd969663d3cbde1412 refs/heads/main
+003cd6e583c870956db0454a75fd969663d3cbde1412 refs/tags/v0.1.0
+0000`;
+    global.fetch = async (url) => {
+      assert.match(String(url), /info\/refs\?service=git-upload-pack/);
+      return new Response(fakeGitUploadPack, { status: 200 });
+    };
+    try {
+      const res = await checker.fetchLatest('github:DDDonzy/dsh-history-rewind');
+      assert.equal(res.sha, 'd6e583c870956db0454a75fd969663d3cbde1412');
+      assert.equal(res.shortSha, 'd6e583c');
+      assert.equal(res.tag, 'v0.1.0');
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
+  await t('Smart Git HTTP 失败时降级至 GitHub API', async () => {
+    const checker = createGitHubChecker();
+    const orig = global.fetch;
+    let smartTried = false;
+    let apiTried = false;
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('info/refs')) {
+        smartTried = true;
+        return new Response('Not Found', { status: 404 });
+      }
+      if (u.includes('api.github.com')) {
+        apiTried = true;
+        return new Response(JSON.stringify({ sha: '1111222233334444555566667777888899990000' }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    };
+    try {
+      const res = await checker.fetchLatest('github:test/repo');
+      assert.equal(smartTried, true);
+      assert.equal(apiTried, true);
+      assert.equal(res.sha, '1111222233334444555566667777888899990000');
+      assert.equal(res.shortSha, '1111222');
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
+  process.stdout.write('checkProfileUpdates (GitHub 依赖):\n');
+  await t('commit 一致 → current (已是最新)', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo-gh1',
+      private: true,
+      dependencies: { 'dsh-history-rewind': 'github:DDDonzy/dsh-history-rewind' },
+    }, null, 2) + '\n');
+    fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), `
+importers:
+  .:
+    dependencies:
+      dsh-history-rewind:
+        specifier: github:DDDonzy/dsh-history-rewind
+        version: https://codeload.github.com/DDDonzy/dsh-history-rewind/tar.gz/d6e583c870956db0454a75fd969663d3cbde1412
+`);
+    const gh = createGitHubChecker();
+    const orig = global.fetch;
+    global.fetch = async () => new Response(`00000159d6e583c870956db0454a75fd969663d3cbde1412 HEAD\n0000`, { status: 200 });
+    try {
+      const out = await checkProfileUpdates(dir, { githubChecker: gh });
+      assert.equal(out.length, 1);
+      assert.equal(out[0].name, 'dsh-history-rewind');
+      assert.equal(out[0].status, 'current');
+      assert.equal(out[0].latest, 'd6e583c');
+      assert.equal(out[0].isGitHub, true);
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
+  await t('commit 不一致 → outdated (有新版)', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo-gh2',
+      private: true,
+      dependencies: { 'dsh-history-rewind': 'github:DDDonzy/dsh-history-rewind' },
+    }, null, 2) + '\n');
+    fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), `
+importers:
+  .:
+    dependencies:
+      dsh-history-rewind:
+        specifier: github:DDDonzy/dsh-history-rewind
+        version: https://codeload.github.com/DDDonzy/dsh-history-rewind/tar.gz/1111111111111111111111111111111111111111
+`);
+    const gh = createGitHubChecker();
+    const orig = global.fetch;
+    global.fetch = async () => new Response(`000001592222222222222222222222222222222222222222 HEAD\n003c2222222222222222222222222222222222222222 refs/tags/v0.2.0\n0000`, { status: 200 });
+    try {
+      const out = await checkProfileUpdates(dir, { githubChecker: gh });
+      assert.equal(out.length, 1);
+      assert.equal(out[0].name, 'dsh-history-rewind');
+      assert.equal(out[0].status, 'outdated');
+      assert.equal(out[0].latest, 'v0.2.0 (2222222)');
+      assert.equal(out[0].isGitHub, true);
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
+  process.stdout.write('updatePlugin (GitHub 依赖):\n');
+  await t('GitHub 依赖更新：保留 package.json 依赖格式且调用 pnpm update', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo-gh3',
+      private: true,
+      dependencies: { 'dsh-history-rewind': 'github:DDDonzy/dsh-history-rewind' },
+    }, null, 2) + '\n');
+    fs.mkdirSync(path.join(dir, 'node_modules'));
+    fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), `
+importers:
+  .:
+    dependencies:
+      dsh-history-rewind:
+        specifier: github:DDDonzy/dsh-history-rewind
+        version: https://codeload.github.com/DDDonzy/dsh-history-rewind/tar.gz/1111111111111111111111111111111111111111
+`);
+    const fakeNode = process.execPath;
+    const fakePnpm = path.join(dir, 'fake-pnpm-gh.cjs');
+    // fake pnpm 捕获命令并将 lockfile 更新为 new commit
+    fs.writeFileSync(fakePnpm, `
+      const fs = require('fs');
+      const path = require('path');
+      const args = process.argv.slice(2);
+      fs.writeFileSync(${JSON.stringify(path.join(dir, 'pnpm-args.json'))}, JSON.stringify(args));
+      // 模拟 pnpm update 更新了 lockfile
+      const newLock = \`
+importers:
+  .:
+    dependencies:
+      dsh-history-rewind:
+        specifier: github:DDDonzy/dsh-history-rewind
+        version: https://codeload.github.com/DDDonzy/dsh-history-rewind/tar.gz/2222222222222222222222222222222222222222
+\`;
+      fs.writeFileSync(${JSON.stringify(path.join(dir, 'pnpm-lock.yaml'))}, newLock);
+      process.exit(0);
+    `);
+
+    const res = await updatePlugin(dir, 'dsh-history-rewind', {
+      nodeBin: fakeNode,
+      pnpmCjs: fakePnpm,
+      log: () => {},
+    });
+
+    assert.equal(res.ok, true);
+    assert.equal(res.from, '1111111');
+    assert.equal(res.to, '2222222');
+
+    // 关键校验：package.json 必须保留原 github:... 格式，绝不能被改成 ^new2222 或 ^latest
+    const afterPkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.equal(afterPkg.dependencies['dsh-history-rewind'], 'github:DDDonzy/dsh-history-rewind');
+
+    // 校验执行了 pnpm update dsh-history-rewind
+    const args = JSON.parse(fs.readFileSync(path.join(dir, 'pnpm-args.json'), 'utf8'));
+    assert.equal(args[0], 'update');
+    assert.equal(args.includes('dsh-history-rewind'), true);
   });
 
   if (failed) {

@@ -158,7 +158,7 @@ function statusTagFor(item, p) {
     return `<span class="tag current" title="最新版本 ${esc(st.latest || '')}">已是最新</span>`;
   }
   if (st.status === 'unknown') {
-    return `<span class="tag unknown" title="registry 不可达或依赖为协议型">未知</span>`;
+    return `<span class="tag unknown" title="远端不可达或依赖为本地/私有协议">未知</span>`;
   }
   if (st.status === 'updated') {
     return `<span class="tag current" title="已升级到 ${esc(st.to || '')}">已更新 ${esc(st.to || '')}</span>`;
@@ -174,6 +174,7 @@ function updateBtnFor(item, p) {
   if (!st) return '<button class="btn-update" data-act="upd-one" data-profile="' + esc(p) + '" data-key="' + esc(item.rawName || item.name) + '">更新</button>';
   if (st.loading) return '<button class="btn-update" disabled>更新中…</button>';
   if (st.status === 'outdated') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="${esc(st.latest || 'latest')}">更新到 ${esc(st.latest || 'latest')}</button>`;
+  if (st.status === 'unknown') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">更新</button>`;
   if (st.status === 'failed') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">重试</button>`;
   return '';
 }
@@ -374,7 +375,7 @@ async function checkUpdates(profiles) {
           m.set(u.name, {
             loading: false,
             latest: u.latest,
-            from: u.range,
+            from: u.from || u.range,
             status: u.status,
             error: null,
           });
@@ -521,7 +522,7 @@ function applyUpdateCache(cache) {
         m.set(u.name, {
           loading: false,
           latest: u.latest,
-          from: u.range,
+          from: u.from || u.range,
           status: u.status,
           error: null,
         });

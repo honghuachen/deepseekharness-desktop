@@ -593,6 +593,7 @@ function openUpdateWindow() {
       downloadShellUpdate: (onProgress) => shellAutoUpdater.checkAndDownload(onProgress),
       installShellUpdate: () => shellAutoUpdater.quitAndInstall(),
       openExternal: (url) => shell.openExternal(url),
+      openPluginManager: () => openManager(),
       log: logLine,
     });
   } catch (err) {

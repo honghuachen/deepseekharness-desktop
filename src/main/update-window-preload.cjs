@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('updateAPI', {
   openExternal: (url) => ipcRenderer.invoke('update:open-external', { url }),
   downloadShellUpdate: () => ipcRenderer.invoke('update:shell-download'),
   installShellUpdate: () => ipcRenderer.invoke('update:shell-install'),
+  openPluginManager: () => ipcRenderer.invoke('update:open-plugin-manager'),
   onInstallLog: (callback) => {
     const listener = (_evt, line) => callback(line);
     ipcRenderer.on('update:install-log', listener);

@@ -13,11 +13,15 @@
   }
   @media (prefers-color-scheme: dark) { body { background: #17181a; color: #d6d9dd; } .card{background:#1f2124!important} }
   h1 { font-size: 15px; margin: 0 0 4px; display:flex; align-items:center; gap: 10px; }
-  h1 .refresh {
-    margin-left: auto; font: 12px -apple-system, sans-serif; padding: 4px 12px; border-radius: 6px;
+  h1 .header-actions {
+    margin-left: auto; display: flex; align-items: center; gap: 8px;
+  }
+  h1 .header-actions button {
+    font: 12px -apple-system, sans-serif; padding: 4px 12px; border-radius: 6px;
     border: 1px solid rgba(128,128,128,.35); background: transparent; color: inherit; cursor: pointer;
   }
-  h1 .refresh:disabled { opacity:.5; cursor: not-allowed; }
+  h1 .header-actions button:disabled { opacity:.5; cursor: not-allowed; }
+  h1 .header-actions button:hover:not(:disabled) { background: rgba(128,128,128,.08); }
   .sub { font-size: 12px; opacity: .6; margin-bottom: 14px; }
   .card {
     background: #fff; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
@@ -84,7 +88,13 @@
 </style>
 </head>
 <body>
-  <h1>检查更新 <button class="refresh" id="refreshBtn">刷新</button></h1>
+  <h1>
+    <span>检查更新</span>
+    <div class="header-actions">
+      <button id="openPluginsBtn" title="打开第三方插件管理">第三方插件管理</button>
+      <button class="refresh" id="refreshBtn">刷新</button>
+    </div>
+  </h1>
   <div class="sub">同时检测容器（壳应用）与内核（@deepseek-ai/dsh）的可用版本。</div>
 
   <div class="card" id="shellCard">加载中…</div>
@@ -326,6 +336,9 @@ document.addEventListener('click', (ev) => {
 });
 
 $('#refreshBtn').addEventListener('click', refresh);
+$('#openPluginsBtn')?.addEventListener('click', () => {
+  window.updateAPI.openPluginManager();
+});
 
 window.updateAPI.onInstallLog((line) => {
   if (!switching) return;

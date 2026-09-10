@@ -13,17 +13,24 @@ const {
   removePluginsFromProfile,
   isOfficial,
   createRegistryChecker,
+  createGitHubChecker,
   checkProfileUpdates,
   updatePlugin,
   updatePlugins,
 } = require('./plugin-guard');
 
 let win = null; // 单例窗口
-// 进程内单例 registry checker，跨调用复用缓存（5 分钟 TTL）
+// 进程内单例 registry checker 与 github checker，跨调用复用缓存（5 分钟 TTL）
 let registry = null;
 function getRegistry(log) {
   if (!registry) registry = createRegistryChecker({ log });
   return registry;
+}
+
+let githubChecker = null;
+function getGitHubChecker(log) {
+  if (!githubChecker) githubChecker = createGitHubChecker({ log });
+  return githubChecker;
 }
 
 // 上次更新检查结果的持久化缓存（dshHome/.plugin-updates.json）：
@@ -185,12 +192,13 @@ function registerIpc(context) {
         names = names.filter((n) => profileFilter.includes(n));
       }
       const reg = getRegistry(context.log);
+      const gh = getGitHubChecker(context.log);
       const updates = {};
       await Promise.all(
         names.map(async (p) => {
           const dir = path.join(profilesRoot, p);
           try {
-            updates[p] = await checkProfileUpdates(dir, { registry: reg, log: context.log });
+            updates[p] = await checkProfileUpdates(dir, { registry: reg, githubChecker: gh, log: context.log });
           } catch (err) {
             updates[p] = { error: String(err.message || err) };
           }
@@ -218,12 +226,14 @@ function registerIpc(context) {
       try {
         const nodeBin = context.getNodeBin ? await context.getNodeBin() : undefined;
         const reg = getRegistry(context.log);
+        const gh = getGitHubChecker(context.log);
         const result = await updatePlugin(dir, name, {
           targetVersion: target,
           nodeBin,
           pnpmCjs: context.pnpmCjs,
           log: context.log,
           registry: reg,
+          githubChecker: gh,
         });
         if (result.ok && result.from !== result.to) invalidateUpdatesCache(context.dshHome(), profile, [name]);
         return { ...result, profile, profiles: buildInventory(context.dshHome()) };
@@ -255,11 +265,13 @@ function registerIpc(context) {
 
       const nodeBin = context.getNodeBin ? await context.getNodeBin() : undefined;
       const reg = getRegistry(context.log);
+      const gh = getGitHubChecker(context.log);
       const { report } = await updatePlugins(dir, items, {
         nodeBin,
         pnpmCjs: context.pnpmCjs,
         log: context.log,
         registry: reg,
+        githubChecker: gh,
       });
 
       const okNames = report.filter((r) => r.ok && r.from !== r.to).map((r) => r.name);

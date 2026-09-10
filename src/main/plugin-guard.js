@@ -255,6 +255,200 @@ function createRegistryChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
   return { fetchLatest, fetchLatestMany, clear };
 }
 
+/**
+ * 解析 GitHub 依赖规格（如 github:owner/repo、github:owner/repo#branch、git+https://github.com/owner/repo.git）。
+ * 返回 { owner, repo, ref } 或 null。
+ */
+function parseGitHubSpec(range) {
+  if (!range || typeof range !== 'string') return null;
+  const s = range.trim();
+  // 1) github:owner/repo(#ref)?
+  let m = s.match(/^github:([a-zA-Z0-9._-]+)\/([a-zA-Z0-9._-]+?)(?:\.git)?(?:#(.*))?$/i);
+  if (m) {
+    return { owner: m[1], repo: m[2], ref: m[3] || 'HEAD' };
+  }
+  // 2) (git+)?https?://github.com/owner/repo(.git)?(#ref)?
+  m = s.match(/^(?:git\+)?https?:\/\/github\.com\/([a-zA-Z0-9._-]+)\/([a-zA-Z0-9._-]+?)(?:\.git)?(?:#(.*))?$/i);
+  if (m) {
+    return { owner: m[1], repo: m[2], ref: m[3] || 'HEAD' };
+  }
+  // 3) git@github.com:owner/repo(.git)?(#ref)?
+  m = s.match(/^git@github\.com:([a-zA-Z0-9._-]+)\/([a-zA-Z0-9._-]+?)(?:\.git)?(?:#(.*))?$/i);
+  if (m) {
+    return { owner: m[1], repo: m[2], ref: m[3] || 'HEAD' };
+  }
+  return null;
+}
+
+/**
+ * 从 profile 的 pnpm-lock.yaml 中提取指定包当前锁定的 git commit SHA（40 位哈希）。
+ */
+function getInstalledGitCommit(profileDir, pkgName) {
+  const lockFile = path.join(profileDir, 'pnpm-lock.yaml');
+  try {
+    const content = fsSync.readFileSync(lockFile, 'utf8');
+    const escaped = pkgName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // 在 importers / dependencies 下匹配 specifier 为 github 或 git，提取紧随的 tar.gz/<sha> 或 version 里的 sha
+    const reg1 = new RegExp(`['"]?${escaped}['"]?:[\\s\\S]*?version:\\s*.*?([0-9a-f]{40})`, 'i');
+    const m1 = content.match(reg1);
+    if (m1) return m1[1];
+    // 或在 packages 段匹配包名对应的 key，提取 40 位 sha
+    const reg2 = new RegExp(`['"]?${escaped}@[^'"]*?([0-9a-f]{40})`, 'i');
+    const m2 = content.match(reg2);
+    if (m2) return m2[1];
+  } catch {}
+  return null;
+}
+
+/**
+ * GitHub 远端版本与 Commit 检测器：
+ *   - 优先通过 Smart Git HTTP 协议 (info/refs?service=git-upload-pack) 查询，免除 GitHub REST API 60次/小时的 Rate Limit
+ *   - 备选降级至 GitHub REST API (/repos/:owner/:repo/commits/:ref)
+ *   - 5 分钟 TTL 内存缓存与并发去重
+ */
+function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
+  const cache = new Map(); // cacheKey -> { sha, shortSha, tag, expiresAt }
+  const inflight = new Map(); // cacheKey -> Promise<object|null>
+
+  async function fetchLatest(spec) {
+    const parsed = typeof spec === 'string' ? parseGitHubSpec(spec) : spec;
+    if (!parsed || !parsed.owner || !parsed.repo) return null;
+    const { owner, repo, ref = 'HEAD' } = parsed;
+    const cacheKey = `${owner.toLowerCase()}/${repo.toLowerCase()}#${ref}`;
+
+    if (inflight.has(cacheKey)) return inflight.get(cacheKey);
+    const cached = cache.get(cacheKey);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) return cached;
+
+    const p = (async () => {
+      try {
+        // 方法 1：Smart Git HTTP 协议，免 GitHub API Rate Limit 限制
+        const gitUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/info/refs?service=git-upload-pack`;
+        const res = await fetch(gitUrl, {
+          headers: {
+            'User-Agent': 'DeepseekHarnessApp',
+            'Accept': '*/*',
+          },
+          signal: AbortSignal.timeout(12_000),
+        });
+
+        if (res.ok) {
+          const text = await res.text();
+          let headSha = null;
+          const tags = new Map(); // sha -> tagName
+          const branches = new Map(); // branchName -> sha
+
+          for (const line of text.split('\n')) {
+            const m = line.match(/([0-9a-f]{40})\s+([^\s\0]+)/i);
+            if (!m) continue;
+            const sha = m[1].toLowerCase();
+            const refName = m[2];
+            if (refName === 'HEAD') {
+              headSha = sha;
+            } else if (refName.startsWith('refs/heads/')) {
+              branches.set(refName.slice('refs/heads/'.length), sha);
+            } else if (refName.startsWith('refs/tags/')) {
+              const tagName = refName.slice('refs/tags/'.length).replace(/\^{}$/, '');
+              tags.set(sha, tagName);
+            }
+          }
+
+          let targetSha = null;
+          let targetTag = null;
+
+          if (!ref || ref === 'HEAD') {
+            targetSha = headSha || branches.get('main') || branches.get('master') || null;
+          } else if (branches.has(ref)) {
+            targetSha = branches.get(ref);
+          } else {
+            for (const [sha, tName] of tags.entries()) {
+              if (tName === ref) {
+                targetSha = sha;
+                targetTag = tName;
+                break;
+              }
+            }
+          }
+
+          if (targetSha) {
+            targetTag = targetTag || tags.get(targetSha) || null;
+            const result = {
+              sha: targetSha,
+              shortSha: targetSha.slice(0, 7),
+              tag: targetTag,
+              expiresAt: now + ttlMs,
+            };
+            cache.set(cacheKey, result);
+            return result;
+          }
+        }
+      } catch (err) {
+        log(`[github-checker] Smart HTTP 查询 ${owner}/${repo} 失败: ${err.message}，尝试 API 降级…`);
+      }
+
+      // 方法 2：降级至 GitHub REST API
+      try {
+        const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref || 'HEAD')}`;
+        const res = await fetch(apiUrl, {
+          headers: {
+            'User-Agent': 'DeepseekHarnessApp',
+            'Accept': 'application/vnd.github.v3+json',
+          },
+          signal: AbortSignal.timeout(12_000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && typeof data.sha === 'string' && /^[0-9a-f]{40}$/i.test(data.sha)) {
+            const sha = data.sha.toLowerCase();
+            const result = {
+              sha,
+              shortSha: sha.slice(0, 7),
+              tag: null,
+              expiresAt: now + ttlMs,
+            };
+            cache.set(cacheKey, result);
+            return result;
+          }
+        }
+      } catch (err) {
+        log(`[github-checker] GitHub API 查询 ${owner}/${repo} 失败: ${err.message}`);
+      }
+
+      return null;
+    })().finally(() => {
+      inflight.delete(cacheKey);
+    });
+
+    inflight.set(cacheKey, p);
+    return p;
+  }
+
+  async function fetchLatestMany(specs) {
+    const out = new Map();
+    const queue = [...specs];
+    const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+      while (queue.length) {
+        const s = queue.shift();
+        if (s) {
+          const res = await fetchLatest(s);
+          const key = typeof s === 'string' ? s : `${s.owner}/${s.repo}#${s.ref || 'HEAD'}`;
+          out.set(key, res);
+        }
+      }
+    });
+    await Promise.all(workers);
+    return out;
+  }
+
+  function clear() {
+    cache.clear();
+    inflight.clear();
+  }
+
+  return { fetchLatest, fetchLatestMany, clear };
+}
+
 /** 把 semver range（如 ^0.8.1、~1.2.0、>=2.0.0）粗略规整为可比较的字符串 */
 function normalizeRange(range) {
   if (!range) return '';
@@ -282,36 +476,93 @@ function compareRangeToLatest(range, latest) {
 
 /**
  * 检查一个 profile 的全部依赖（仅第三方）是否有更新。
- * @returns {Promise<Array<{name, range, latest, status:'outdated'|'current'|'unknown', error?:string}>>}
+ * 支持 npm registry 与 GitHub 仓库依赖。
+ * @returns {Promise<Array<{name, range, latest, status:'outdated'|'current'|'unknown', from?:string, isGitHub?:boolean, error?:string}>>}
  */
-async function checkProfileUpdates(profileDir, { registry, log = () => {} } = {}) {
+async function checkProfileUpdates(profileDir, { registry, githubChecker, log = () => {} } = {}) {
   const inv = inventoryProfile(profileDir);
   if (!inv.exists) return [];
   const third = inv.deps.filter((d) => !d.official);
   if (third.length === 0) return [];
+
   const reg = registry || createRegistryChecker({ log });
-  const latestMap = await reg.fetchLatestMany(third.map((d) => d.name));
-  return third.map((d) => {
-    const latest = latestMap.get(d.name) ?? null;
-    return {
+  const gh = githubChecker || createGitHubChecker({ log });
+
+  const npmDeps = [];
+  const ghDeps = [];
+
+  for (const d of third) {
+    const ghSpec = parseGitHubSpec(d.range);
+    if (ghSpec) {
+      ghDeps.push({ dep: d, spec: ghSpec });
+    } else {
+      npmDeps.push(d);
+    }
+  }
+
+  const [npmLatestMap] = await Promise.all([
+    reg.fetchLatestMany(npmDeps.map((d) => d.name)),
+    gh.fetchLatestMany(ghDeps.map((g) => g.spec)),
+  ]);
+
+  const results = [];
+
+  for (const d of npmDeps) {
+    const latest = npmLatestMap.get(d.name) ?? null;
+    results.push({
       name: d.name,
       range: d.range,
       latest,
       status: compareRangeToLatest(d.range, latest),
-    };
-  });
+    });
+  }
+
+  for (const { dep, spec } of ghDeps) {
+    const remote = await gh.fetchLatest(spec);
+    const installedSha = getInstalledGitCommit(profileDir, dep.name);
+    const installedVer = readJson(path.join(profileDir, 'node_modules', dep.name, 'package.json'))?.version;
+
+    if (!remote || !installedSha) {
+      results.push({
+        name: dep.name,
+        range: dep.range,
+        latest: remote ? (remote.tag ? `${remote.tag} (${remote.shortSha})` : remote.shortSha) : null,
+        status: 'unknown',
+        isGitHub: true,
+      });
+      continue;
+    }
+
+    const isMatch = remote.sha.toLowerCase() === installedSha.toLowerCase();
+    const latestLabel = remote.tag ? `${remote.tag} (${remote.shortSha})` : remote.shortSha;
+    const installedLabel = installedVer ? `${installedVer} (${installedSha.slice(0, 7)})` : installedSha.slice(0, 7);
+
+    results.push({
+      name: dep.name,
+      range: dep.range,
+      latest: latestLabel,
+      from: installedLabel,
+      status: isMatch ? 'current' : 'outdated',
+      isGitHub: true,
+      installedSha,
+      remoteSha: remote.sha,
+    });
+  }
+
+  return results;
 }
 
 /**
  * 批量升级一个 profile 内的多个第三方依赖。
- * 步骤：备份 package.json → 为各插件写新 range（若未指定或 latest 则向 registry 解析实际版本）
- *      → 单次 pnpm install 收敛 node_modules → 校验各包实际版本并写回 package.json。
+ * 步骤：备份 package.json → 为 npm 插件写新 range（若未指定或 latest 则向 registry 解析实际版本）；
+ *      对 GitHub 插件保留原 range → 调用 pnpm install / pnpm update 收敛 node_modules
+ *      → 校验各包实际版本与 commit SHA 并写回 package.json。
  * @param {string} profileDir profile 目录
  * @param {Array<{name: string, target?: string}>} items 待升级插件列表
- * @param {object} opts {nodeBin, pnpmCjs, log, registry}
+ * @param {object} opts {nodeBin, pnpmCjs, log, registry, githubChecker}
  * @returns {Promise<{report: Array<{name, from, to, ok, error?:string}>, anyChanged: boolean}>}
  */
-async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => {}, registry } = {}) {
+async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => {}, registry, githubChecker } = {}) {
   if (!Array.isArray(items) || items.length === 0) {
     return { report: [], anyChanged: false };
   }
@@ -341,6 +592,22 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
       continue;
     }
 
+    const ghSpec = parseGitHubSpec(oldRange);
+    if (ghSpec) {
+      const oldSha = getInstalledGitCommit(profileDir, name);
+      const oldVer = readJson(path.join(profileDir, 'node_modules', name, 'package.json'))?.version;
+      validItems.push({
+        name,
+        oldRange,
+        target: item.target || 'latest',
+        targetRange: oldRange, // GitHub 依赖严禁改写为 npm 版本
+        isGitHub: true,
+        oldSha,
+        oldVer,
+      });
+      continue;
+    }
+
     let target = item.target || 'latest';
     // 若未指定或为 latest，尝试向 registry 查询最新版本号
     if (target === 'latest') {
@@ -352,7 +619,7 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
 
     // 规范写入范围：若有具体版本且不以 ^ 开头，规范为 ^x.y.z；若仍为 latest 则保留
     const targetRange = target === 'latest' ? 'latest' : (target.startsWith('^') ? target : `^${target}`);
-    validItems.push({ name, oldRange, target, targetRange });
+    validItems.push({ name, oldRange, target, targetRange, isGitHub: false });
   }
 
   if (validItems.length === 0) {
@@ -363,11 +630,17 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
   await fsPromises.mkdir(backupDir, { recursive: true });
   await fsPromises.copyFile(pkgFile, path.join(backupDir, 'package.json'));
 
+  let pkgModified = false;
   for (const v of validItems) {
-    pkg.dependencies[v.name] = v.targetRange;
-    log(`[guard] ${path.basename(profileDir)}: ${v.name} ${v.oldRange} → ${v.targetRange}`);
+    if (!v.isGitHub) {
+      pkg.dependencies[v.name] = v.targetRange;
+      log(`[guard] ${path.basename(profileDir)}: ${v.name} ${v.oldRange} → ${v.targetRange}`);
+      pkgModified = true;
+    }
   }
-  await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
+  if (pkgModified) {
+    await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
+  }
 
   if (!nodeBin || !pnpmCjs) {
     for (const v of validItems) {
@@ -396,51 +669,104 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
     return { report, anyChanged: false };
   }
 
+  const githubItems = validItems.filter((v) => v.isGitHub);
+  const npmItems = validItems.filter((v) => !v.isGitHub);
+
   try {
-    await runPnpm(
-      nodeBin,
-      pnpmCjs,
-      [
-        'install',
-        '--no-frozen-lockfile',
-        '--config.dangerously-allow-all-builds=true',
-        '--config.strict-dep-builds=false',
-      ],
-      profileDir,
-      (l) => log(`[guard]   ${l}`),
-    );
+    // 1) 如果包含 npm 依赖更新，执行 pnpm install
+    if (npmItems.length > 0) {
+      await runPnpm(
+        nodeBin,
+        pnpmCjs,
+        [
+          'install',
+          '--no-frozen-lockfile',
+          '--config.dangerously-allow-all-builds=true',
+          '--config.strict-dep-builds=false',
+        ],
+        profileDir,
+        (l) => log(`[guard]   ${l}`),
+      );
+    }
+
+    // 2) 如果包含 GitHub 依赖更新，调用 pnpm update 强制拉取远端最新 commit
+    if (githubItems.length > 0) {
+      const ghNames = githubItems.map((v) => v.name);
+      await runPnpm(
+        nodeBin,
+        pnpmCjs,
+        [
+          'update',
+          ...ghNames,
+          '--config.dangerously-allow-all-builds=true',
+          '--config.strict-dep-builds=false',
+        ],
+        profileDir,
+        (l) => log(`[guard]   ${l}`),
+      );
+    }
+
     const refreshed = readJson(pkgFile) || pkg;
-    let pkgModified = false;
+    let pkgFinalModified = false;
 
     for (const v of validItems) {
       const installed = readJson(path.join(profileDir, 'node_modules', v.name, 'package.json'));
-      let finalRange = refreshed?.dependencies?.[v.name] ?? v.targetRange;
-      if (installed?.version && refreshed?.dependencies) {
-        finalRange = `^${installed.version}`;
-        refreshed.dependencies[v.name] = finalRange;
-        pkgModified = true;
-      }
 
-      // 验证版本是否真正发生变更（排除由于 lockfile 锁定未更新并写回旧版的情形）
-      if (installed?.version && finalRange === v.oldRange) {
-        report.push({
-          name: v.name,
-          from: v.oldRange,
-          to: finalRange,
-          ok: false,
-          error: `已装版本未提升（仍为 ${v.oldRange}），更新未生效`,
-        });
+      if (v.isGitHub) {
+        const newSha = getInstalledGitCommit(profileDir, v.name);
+        const newVer = installed?.version;
+
+        const shaChanged = newSha && v.oldSha && newSha.toLowerCase() !== v.oldSha.toLowerCase();
+        const verChanged = newVer && v.oldVer && newVer !== v.oldVer;
+
+        const fromLabel = v.oldSha ? v.oldSha.slice(0, 7) : (v.oldVer || v.oldRange);
+        const toLabel = newSha ? newSha.slice(0, 7) : (newVer || 'latest');
+
+        if (shaChanged || verChanged) {
+          report.push({
+            name: v.name,
+            from: fromLabel,
+            to: toLabel,
+            ok: true,
+          });
+        } else {
+          report.push({
+            name: v.name,
+            from: fromLabel,
+            to: toLabel,
+            ok: false,
+            error: `已装版本未提升（Commit 未变更），更新未生效`,
+          });
+        }
       } else {
-        report.push({
-          name: v.name,
-          from: v.oldRange,
-          to: finalRange,
-          ok: true,
-        });
+        let finalRange = refreshed?.dependencies?.[v.name] ?? v.targetRange;
+        if (installed?.version && refreshed?.dependencies) {
+          finalRange = `^${installed.version}`;
+          refreshed.dependencies[v.name] = finalRange;
+          pkgFinalModified = true;
+        }
+
+        // 验证版本是否真正发生变更（排除由于 lockfile 锁定未更新并写回旧版的情形）
+        if (installed?.version && finalRange === v.oldRange) {
+          report.push({
+            name: v.name,
+            from: v.oldRange,
+            to: finalRange,
+            ok: false,
+            error: `已装版本未提升（仍为 ${v.oldRange}），更新未生效`,
+          });
+        } else {
+          report.push({
+            name: v.name,
+            from: v.oldRange,
+            to: finalRange,
+            ok: true,
+          });
+        }
       }
     }
 
-    if (pkgModified) {
+    if (pkgFinalModified) {
       await fsPromises.writeFile(pkgFile, JSON.stringify(refreshed, null, 2) + '\n');
     }
 
@@ -465,6 +791,7 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
             pnpmCjs,
             log,
             registry: reg,
+            githubChecker,
           });
           report.push(r);
         } catch (e2) {
@@ -484,15 +811,16 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
 
 /**
  * 把单个第三方依赖升级到指定版本（默认 latest）。
- * 步骤：备份 package.json → 写新 range → pnpm install 收敛 node_modules。
+ * 步骤：备份 package.json → 写新 range → pnpm install / update 收敛 node_modules。
  * @returns {Promise<{name, from, to, ok, error?:string}>}
  */
-async function updatePlugin(profileDir, name, { targetVersion, nodeBin, pnpmCjs, log = () => {}, registry } = {}) {
+async function updatePlugin(profileDir, name, { targetVersion, nodeBin, pnpmCjs, log = () => {}, registry, githubChecker } = {}) {
   const { report } = await updatePlugins(profileDir, [{ name, target: targetVersion }], {
     nodeBin,
     pnpmCjs,
     log,
     registry,
+    githubChecker,
   });
   return report[0] || { name, ok: false, error: '未知错误' };
 }
@@ -606,6 +934,9 @@ module.exports = {
   markSanitized,
   hasSanitizeMarker,
   createRegistryChecker,
+  createGitHubChecker,
+  parseGitHubSpec,
+  getInstalledGitCommit,
   checkProfileUpdates,
   updatePlugin,
   updatePlugins,

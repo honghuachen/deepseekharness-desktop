@@ -76,6 +76,16 @@ function registerIpc(context) {
     return { ok: true };
   });
 
+  ipcMain.handle(`${CHANNEL}:open-plugin-manager`, () => {
+    try {
+      context.openPluginManager?.();
+      return { ok: true };
+    } catch (err) {
+      context.log?.(`[update-window] 打开第三方插件管理器失败：${err.message}`);
+      return { ok: false, error: String(err.message || err) };
+    }
+  });
+
   return () => {
     ipcMain.removeHandler(`${CHANNEL}:get-state`);
     ipcMain.removeHandler(`${CHANNEL}:refresh`);
@@ -84,6 +94,7 @@ function registerIpc(context) {
     ipcMain.removeHandler(`${CHANNEL}:open-external`);
     ipcMain.removeHandler(`${CHANNEL}:shell-download`);
     ipcMain.removeHandler(`${CHANNEL}:shell-install`);
+    ipcMain.removeHandler(`${CHANNEL}:open-plugin-manager`);
   };
 }
 
@@ -93,6 +104,7 @@ function registerIpc(context) {
  * @param {() => Promise<{activeVersion: string|null, pinnedVersion: string, latestTag: string|null, entries: object[]|null}>} context.getKernelInfo
  * @param {(version: string, opts: {pin: boolean, onLine?: Function}) => Promise<void>} context.switchKernelVersion
  * @param {(url: string) => void} context.openExternal
+ * @param {() => void} [context.openPluginManager]
  * @param {(onProgress?: (percent:number)=>void) => Promise<{ok:boolean, error?:string}>} [context.downloadShellUpdate]
  * @param {() => void} [context.installShellUpdate]
  * @param {Function} [context.log]
