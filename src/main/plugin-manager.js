@@ -7,7 +7,7 @@
 
 const path = require('node:path');
 const fsSync = require('node:fs');
-const { BrowserWindow, ipcMain } = require('electron');
+const { BrowserWindow, ipcMain, shell } = require('electron');
 const {
   inventoryProfile,
   removePluginsFromProfile,
@@ -17,6 +17,8 @@ const {
   checkProfileUpdates,
   updatePlugin,
   updatePlugins,
+  parseGitHubSpec,
+  parseRepoUrl,
 } = require('./plugin-guard');
 
 let win = null; // 单例窗口
@@ -97,12 +99,38 @@ function buildInventory(dshHome) {
       // 合并依赖与补丁层引用为统一的条目列表
       const byName = new Map();
       for (const d of inv.deps) {
+        let githubUrl = null;
+        let npmUrl = null;
+
+        if (!d.official) {
+          const ghSpec = parseGitHubSpec(d.range);
+          if (ghSpec) {
+            githubUrl = `https://github.com/${ghSpec.owner}/${ghSpec.repo}`;
+          } else if (!/^(git\+|github:|gitlab:|bitbucket:|file:|workspace:|link:|portal:|http:|https:)/i.test(d.range)) {
+            npmUrl = `https://www.npmjs.com/package/${d.name}`;
+          }
+
+          // 尝试读取已安装 node_modules/<d.name>/package.json 中的 repository 与 homepage
+          const installedPkgPath = path.join(dir, 'node_modules', d.name, 'package.json');
+          if (fsSync.existsSync(installedPkgPath)) {
+            try {
+              const installedPkg = JSON.parse(fsSync.readFileSync(installedPkgPath, 'utf8'));
+              const repoUrl = parseRepoUrl(installedPkg.repository) || parseRepoUrl(installedPkg.homepage);
+              if (repoUrl) {
+                githubUrl = repoUrl;
+              }
+            } catch {}
+          }
+        }
+
         byName.set(d.name, {
           name: d.name,
           range: d.range,
           official: d.official,
           inBundle: inv.bundles.includes(d.name),
           inPatch: false,
+          githubUrl,
+          npmUrl,
         });
       }
       for (const ins of inv.inserts) {
@@ -119,6 +147,8 @@ function buildInventory(dshHome) {
             inBundle: false,
             inPatch: true,
             insertOnly: true,
+            githubUrl: null,
+            npmUrl: null,
           });
         }
       }
@@ -130,6 +160,8 @@ function buildInventory(dshHome) {
             official: isOfficial(b),
             inBundle: true,
             inPatch: false,
+            githubUrl: null,
+            npmUrl: null,
           });
         }
       }
@@ -278,6 +310,14 @@ function registerIpc(context) {
       if (okNames.length) invalidateUpdatesCache(context.dshHome(), profile, okNames);
       return { report, profile, profiles: buildInventory(context.dshHome()) };
     }
+    if (cmd === 'openExternal') {
+      const url = payload?.url;
+      if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+        shell.openExternal(url);
+        return { ok: true };
+      }
+      return { ok: false, error: '无效 URL' };
+    }
     throw new Error(`未知命令 ${cmd}`);
   };
   ipcMain.handle('pm', handler);
@@ -311,6 +351,12 @@ function openPluginManager({ dshHome, pnpmCjs, getNodeBin, log = () => {} } = {}
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
   });
   win.loadFile(path.join(__dirname, 'pages', 'plugins.html'));
   // 开发诊断：DSH_WEB_DEV_PM_DUMP=<路径> 时导出窗口文本

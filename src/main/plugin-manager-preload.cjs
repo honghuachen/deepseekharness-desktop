@@ -12,4 +12,6 @@ contextBridge.exposeInMainWorld('pluginAPI', {
     ipcRenderer.invoke('pm', 'update', { profile, name, target }),
   // 新增：一键升级 profile 内多个第三方依赖（串行）
   updateAll: (profile, names) => ipcRenderer.invoke('pm', 'updateAll', { profile, names }),
+  // 打开系统外部浏览器链接
+  openExternal: (url) => ipcRenderer.invoke('pm', 'openExternal', { url }),
 });

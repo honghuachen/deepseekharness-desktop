@@ -281,6 +281,39 @@ function parseGitHubSpec(range) {
 }
 
 /**
+ * 解析 package.json 中的 repository 字段或 homepage 字段，提取标准开源仓库 URL。
+ * 支持：
+ *   - "github:owner/repo"
+ *   - "owner/repo"
+ *   - "git+https://github.com/owner/repo.git"
+ *   - "https://github.com/owner/repo"
+ *   - "git://github.com/owner/repo.git"
+ *   - "git@github.com:owner/repo.git"
+ *   - "ssh://git@github.com/owner/repo.git"
+ *   - { type: 'git', url: '...' }
+ *   - 其它通用 http(s) URL
+ * 返回规整后的 URL（如 https://github.com/owner/repo），无法解析返回 null。
+ */
+function parseRepoUrl(repo) {
+  if (!repo) return null;
+  const raw = typeof repo === 'string' ? repo.trim() : (typeof repo.url === 'string' ? repo.url.trim() : '');
+  if (!raw) return null;
+
+  // 1) 匹配各种形式的 GitHub 仓库引用
+  const m = raw.match(/(?:(?:github\.com[/:|])|github:|^)([a-zA-Z0-9._-]+)\/([a-zA-Z0-9._-]+?)(?:\.git)?(?:[#?].*)?$/i);
+  if (m) {
+    return `https://github.com/${m[1]}/${m[2]}`;
+  }
+
+  // 2) 其它标准 http(s) 链接（如 GitLab / Gitee 等）
+  if (/^https?:\/\//i.test(raw)) {
+    return raw.replace(/\.git$/i, '').replace(/#.*$/, '');
+  }
+
+  return null;
+}
+
+/**
  * 从 profile 的 pnpm-lock.yaml 中提取指定包当前锁定的 git commit SHA（40 位哈希）。
  */
 function getInstalledGitCommit(profileDir, pkgName) {
@@ -936,6 +969,7 @@ module.exports = {
   createRegistryChecker,
   createGitHubChecker,
   parseGitHubSpec,
+  parseRepoUrl,
   getInstalledGitCommit,
   checkProfileUpdates,
   updatePlugin,

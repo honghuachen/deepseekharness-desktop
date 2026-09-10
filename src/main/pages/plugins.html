@@ -60,6 +60,58 @@
   .tag.current { background: rgba(47,158,68,.16); color:#2f9e44; }
   @media (prefers-color-scheme: dark){ .tag.current{color:#51cd6d} }
   .tag.unknown { background: rgba(128,128,128,.18); color: inherit; opacity:.7; }
+  .pkg-name-link {
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+    border-bottom: 1px dashed rgba(128,128,128,.4);
+    transition: color .15s, border-bottom-color .15s;
+  }
+  .pkg-name-link:hover {
+    color: #3b62f6;
+    border-bottom-color: #3b62f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    .pkg-name-link:hover {
+      color: #7e97ff;
+      border-bottom-color: #7e97ff;
+    }
+  }
+  .pkg-links {
+    display: inline-flex;
+    gap: 4px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .pkg-link-btn {
+    display: inline-flex;
+    align-items: center;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 10px;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 4px;
+    text-decoration: none;
+    cursor: pointer;
+    border: 1px solid rgba(128,128,128,.25);
+    background: rgba(128,128,128,.08);
+    color: inherit;
+    opacity: .8;
+    transition: opacity .15s, background .15s, color .15s, border-color .15s;
+  }
+  .pkg-link-btn:hover {
+    opacity: 1;
+    background: rgba(77,107,254,.15);
+    border-color: rgba(77,107,254,.4);
+    color: #3b62f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    .pkg-link-btn:hover {
+      background: rgba(126,151,255,.18);
+      border-color: rgba(126,151,255,.45);
+      color: #7e97ff;
+    }
+  }
   input[type=checkbox]{ width:15px; height:15px; accent-color:#4d6bfe; cursor:pointer; }
   input[type=checkbox]:disabled{ cursor:not-allowed; opacity:.35; }
   tr.info td { opacity:.55; }
@@ -190,9 +242,30 @@ function renderRow(profile, item) {
   }
   const checked = selected.get(profile)?.has(key) ? 'checked' : '';
   const updCell = removable ? `${statusTagFor(item, profile)} ${updateBtnFor(item, profile)}` : '';
+
+  let nameHtml = esc(item.name);
+  let linkBadges = '';
+  if (removable) {
+    const bestUrl = item.githubUrl || item.npmUrl;
+    if (bestUrl) {
+      const tip = item.githubUrl ? `点击在浏览器打开 GitHub 仓库：${item.githubUrl}` : `点击在浏览器打开 npm 页面：${item.npmUrl}`;
+      nameHtml = `<a class="pkg-name-link" data-url="${esc(bestUrl)}" title="${esc(tip)}">${esc(item.name)}</a>`;
+    }
+    const badges = [];
+    if (item.githubUrl) {
+      badges.push(`<a class="pkg-link-btn" data-url="${esc(item.githubUrl)}" title="前往 GitHub 开源仓库: ${esc(item.githubUrl)}">GitHub ↗</a>`);
+    }
+    if (item.npmUrl) {
+      badges.push(`<a class="pkg-link-btn" data-url="${esc(item.npmUrl)}" title="前往 npm 页面: ${esc(item.npmUrl)}">npm ↗</a>`);
+    }
+    if (badges.length > 0) {
+      linkBadges = `<span class="pkg-links">${badges.join('')}</span>`;
+    }
+  }
+
   return `<tr>
     <td class="chk">${removable ? `<input type="checkbox" data-profile="${esc(profile)}" data-key="${esc(key)}" ${checked} onchange="onToggle(this)">` : ''}</td>
-    <td class="name" title="${esc(item.name)}">${esc(item.name)}</td>
+    <td class="name" title="${esc(item.name)}">${nameHtml}${linkBadges}</td>
     <td class="range" title="${esc(item.range)}">${esc(item.range)}</td>
     <td class="refs">${item.official ? '<span class="tag official">官方</span>' : '<span class="tag third">第三方</span>'}${refsTags(item)}</td>
     <td class="upd">${updCell}</td>
@@ -326,8 +399,15 @@ $('#checkAllBtn').onclick = async () => {
   await checkUpdates(null);
 };
 
-// 事件代理：行内「更新」按钮 + 卡片标题「检查此 profile」+「更新全部」
+// 事件代理：外链跳转 + 行内「更新」按钮 + 卡片标题「检查此 profile」+「更新全部」
 document.addEventListener('click', async (ev) => {
+  const link = ev.target.closest('[data-url]');
+  if (link && link.dataset.url) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    window.pluginAPI.openExternal(link.dataset.url);
+    return;
+  }
   const t = ev.target.closest('[data-act]');
   if (!t) return;
   if (t.dataset.act === 'upd-one') {

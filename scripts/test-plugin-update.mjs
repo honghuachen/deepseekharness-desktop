@@ -26,12 +26,14 @@ const {
   createRegistryChecker,
   createGitHubChecker,
   parseGitHubSpec,
+  parseRepoUrl,
   getInstalledGitCommit,
   updatePlugin,
   updatePlugins,
   checkProfileUpdates,
   isOfficial,
 } = guard;
+const { buildInventory } = require(path.join(__dirname, '..', 'src', 'main', 'plugin-manager.js'));
 
 let failed = 0;
 function t(name, fn) {
@@ -619,6 +621,73 @@ importers:
     const args = JSON.parse(fs.readFileSync(path.join(dir, 'pnpm-args.json'), 'utf8'));
     assert.equal(args[0], 'update');
     assert.equal(args.includes('dsh-history-rewind'), true);
+  });
+
+  process.stdout.write('parseRepoUrl:\n');
+  await t('解析各类仓库及主页 URL', () => {
+    assert.equal(parseRepoUrl('git+https://github.com/chenhw7/dsh-memory.git'), 'https://github.com/chenhw7/dsh-memory');
+    assert.equal(parseRepoUrl('github:kusesad-1122/dsh-context-compactor'), 'https://github.com/kusesad-1122/dsh-context-compactor');
+    assert.equal(parseRepoUrl('https://github.com/DDDonzy/dsh-history-rewind#readme'), 'https://github.com/DDDonzy/dsh-history-rewind');
+    assert.equal(parseRepoUrl('git@github.com:foo/bar.git'), 'https://github.com/foo/bar');
+    assert.equal(parseRepoUrl('owner/repo'), 'https://github.com/owner/repo');
+    assert.equal(parseRepoUrl({ type: 'git', url: 'git+https://github.com/bowenliang123/dsh-context.git' }), 'https://github.com/bowenliang123/dsh-context');
+    assert.equal(parseRepoUrl('https://gitlab.com/group/repo.git'), 'https://gitlab.com/group/repo');
+    assert.equal(parseRepoUrl(null), null);
+    assert.equal(parseRepoUrl(''), null);
+  });
+
+  process.stdout.write('buildInventory (URL 解析):\n');
+  await t('正确生成第三方插件的 githubUrl 与 npmUrl', () => {
+    const home = tmpProfile();
+    const webDir = path.join(home, 'profiles', 'web');
+    fs.mkdirSync(webDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(webDir, 'package.json'),
+      JSON.stringify({
+        name: 'dsh-profile-web',
+        private: true,
+        dependencies: {
+          '@deepseek-ai/dsh-base': '0.1.0',
+          'dsh-history-rewind': 'github:DDDonzy/dsh-history-rewind',
+          'dsh-context': '^0.48.0',
+          '@memtensor/memos-local-plugin': '^2.0.19',
+        },
+      }),
+    );
+    // 模拟 dsh-context 在 node_modules 中安装并提供了 repository
+    const ctxModDir = path.join(webDir, 'node_modules', 'dsh-context');
+    fs.mkdirSync(ctxModDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(ctxModDir, 'package.json'),
+      JSON.stringify({
+        name: 'dsh-context',
+        repository: { type: 'git', url: 'git+https://github.com/bowenliang123/dsh-context.git' },
+      }),
+    );
+
+    const invs = buildInventory(home);
+    assert.equal(invs.length, 1);
+    const items = invs[0].items;
+
+    const base = items.find((i) => i.name === '@deepseek-ai/dsh-base');
+    assert.equal(base.official, true);
+    assert.equal(base.githubUrl, null);
+    assert.equal(base.npmUrl, null);
+
+    const rewind = items.find((i) => i.name === 'dsh-history-rewind');
+    assert.equal(rewind.official, false);
+    assert.equal(rewind.githubUrl, 'https://github.com/DDDonzy/dsh-history-rewind');
+    assert.equal(rewind.npmUrl, null);
+
+    const ctx = items.find((i) => i.name === 'dsh-context');
+    assert.equal(ctx.official, false);
+    assert.equal(ctx.npmUrl, 'https://www.npmjs.com/package/dsh-context');
+    assert.equal(ctx.githubUrl, 'https://github.com/bowenliang123/dsh-context');
+
+    const memos = items.find((i) => i.name === '@memtensor/memos-local-plugin');
+    assert.equal(memos.official, false);
+    assert.equal(memos.npmUrl, 'https://www.npmjs.com/package/@memtensor/memos-local-plugin');
+    assert.equal(memos.githubUrl, null);
   });
 
   if (failed) {
