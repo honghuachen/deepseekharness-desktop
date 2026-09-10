@@ -27,7 +27,20 @@ function registerIpc(context) {
   }
 
   ipcMain.handle(`${CHANNEL}:get-state`, () => collectState());
-  ipcMain.handle(`${CHANNEL}:refresh`, () => collectState());
+  ipcMain.handle(`${CHANNEL}:refresh`, () => {
+    context.clearKernelReleasesCache?.();
+    return collectState();
+  });
+
+  ipcMain.handle(`${CHANNEL}:get-kernel-changelogs`, async (_evt, payload) => {
+    try {
+      const changelogs = await context.getKernelChangelogs?.(payload);
+      return { ok: true, changelogs };
+    } catch (err) {
+      context.log?.(`[update-window] 获取内核更新日志失败：${err.message}`);
+      return { ok: false, error: String(err.message || err) };
+    }
+  });
 
   ipcMain.handle(`${CHANNEL}:switch-kernel`, async (_evt, payload) => {
     const { version, pin } = payload || {};
@@ -89,6 +102,7 @@ function registerIpc(context) {
   return () => {
     ipcMain.removeHandler(`${CHANNEL}:get-state`);
     ipcMain.removeHandler(`${CHANNEL}:refresh`);
+    ipcMain.removeHandler(`${CHANNEL}:get-kernel-changelogs`);
     ipcMain.removeHandler(`${CHANNEL}:switch-kernel`);
     ipcMain.removeHandler(`${CHANNEL}:clear-pin`);
     ipcMain.removeHandler(`${CHANNEL}:open-external`);

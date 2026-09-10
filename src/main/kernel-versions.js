@@ -56,4 +56,81 @@ async function fetchAllKernelVersions({ log = () => {} } = {}) {
   }
 }
 
-module.exports = { fetchAllKernelVersions, classifyTag, REGISTRY_PACKAGE_URL };
+const DEFAULT_KERNEL_REPO = 'deepseek-ai/deepseek-harness';
+
+/**
+ * 规范化 GitHub Release tag 为与 npm 一致的版本号。
+ * 例如：'dsh-v0.1.5-rc.1' -> '0.1.5-rc.1', 'v0.1.5-alpha.2' -> '0.1.5-alpha.2'。
+ */
+function normalizeReleaseTag(tag) {
+  if (typeof tag !== 'string' || !tag) return '';
+  return tag.replace(/^dsh-v?/i, '').replace(/^v/i, '').trim();
+}
+
+let changelogsCache = null;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * 从 GitHub Releases 拉取内核更新记录，并构建版本号到 Release 详情的映射表。
+ * 网络失败或响应异常时返回 null。
+ */
+async function fetchKernelReleases({
+  repo = DEFAULT_KERNEL_REPO,
+  bypassCache = false,
+  log = () => {},
+} = {}) {
+  const now = Date.now();
+  if (!bypassCache && changelogsCache && now - changelogsCache.timestamp < CACHE_TTL_MS) {
+    return changelogsCache.data;
+  }
+
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=100`, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        'User-Agent': 'DSH-Desktop',
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`GitHub HTTP ${res.status}`);
+    const releases = await res.json();
+    if (!Array.isArray(releases)) throw new Error('releases 返回非数组');
+
+    const changelogs = {};
+    for (const rel of releases) {
+      const tag = rel && rel.tag_name;
+      const ver = normalizeReleaseTag(tag);
+      if (!ver) continue;
+      if (!changelogs[ver]) {
+        changelogs[ver] = {
+          version: ver,
+          tag,
+          name: rel.name || `v${ver}`,
+          publishedAt: rel.published_at || null,
+          body: rel.body || '',
+          htmlUrl: rel.html_url || `https://github.com/${repo}/releases/tag/${tag}`,
+        };
+      }
+    }
+
+    changelogsCache = { timestamp: now, data: changelogs };
+    return changelogs;
+  } catch (err) {
+    log(`[kernel-versions] 拉取 GitHub Releases 失败：${err.message}`);
+    return null;
+  }
+}
+
+function clearKernelReleasesCache() {
+  changelogsCache = null;
+}
+
+module.exports = {
+  fetchAllKernelVersions,
+  classifyTag,
+  normalizeReleaseTag,
+  fetchKernelReleases,
+  clearKernelReleasesCache,
+  REGISTRY_PACKAGE_URL,
+  DEFAULT_KERNEL_REPO,
+};

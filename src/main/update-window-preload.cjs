@@ -5,6 +5,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('updateAPI', {
   getState: () => ipcRenderer.invoke('update:get-state'),
   refresh: () => ipcRenderer.invoke('update:refresh'),
+  getKernelChangelogs: (opts) => ipcRenderer.invoke('update:get-kernel-changelogs', opts),
   switchKernel: (version, pin) => ipcRenderer.invoke('update:switch-kernel', { version, pin }),
   clearPin: () => ipcRenderer.invoke('update:clear-pin'),
   openExternal: (url) => ipcRenderer.invoke('update:open-external', { url }),

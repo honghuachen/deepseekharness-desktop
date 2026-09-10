@@ -21,7 +21,11 @@ const { makePaths, loadSettings, saveSettings, DEFAULT_PORT } = require('./confi
 const { compareVersions } = require('./semver');
 const { createUpdater } = require('./updater');
 const { createKernelSwitcher } = require('./kernel-switch');
-const { fetchAllKernelVersions } = require('./kernel-versions');
+const {
+  fetchAllKernelVersions,
+  fetchKernelReleases,
+  clearKernelReleasesCache,
+} = require('./kernel-versions');
 const { checkShellUpdate } = require('./shell-update');
 const { createShellAutoUpdater } = require('./shell-auto-updater');
 const { createRunner } = require('./runner');
@@ -589,6 +593,8 @@ function openUpdateWindow() {
     openUpdateWindowImpl({
       getShellInfo,
       getKernelInfo,
+      getKernelChangelogs: (opts) => fetchKernelReleases({ ...opts, log: logLine }),
+      clearKernelReleasesCache,
       switchKernelVersion,
       downloadShellUpdate: (onProgress) => shellAutoUpdater.checkAndDownload(onProgress),
       installShellUpdate: () => shellAutoUpdater.quitAndInstall(),

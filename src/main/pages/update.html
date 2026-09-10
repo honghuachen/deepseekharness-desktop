@@ -59,17 +59,85 @@
   .kernel-header .status { font-size: 12px; }
   .kernel-header .status b { font-weight: 600; }
   .version-list {
-    max-height: 320px; overflow-y: auto; border: 1px solid rgba(128,128,128,.15); border-radius: 8px;
+    max-height: 380px; overflow-y: auto; border: 1px solid rgba(128,128,128,.15); border-radius: 8px;
   }
-  .version-row {
-    display:flex; align-items:center; gap: 10px; padding: 8px 12px;
+  .version-item {
     border-top: 1px solid rgba(128,128,128,.12);
   }
-  .version-row:first-child { border-top: none; }
-  .version-row .ver { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
-  .version-row .time { font-size: 11px; opacity:.55; white-space: nowrap; }
-  .version-row .spacer { flex: 1; }
-  .version-row .actions { display:flex; align-items:center; gap: 6px; }
+  .version-item:first-child { border-top: none; }
+  .version-header {
+    display:flex; align-items:center; gap: 8px; padding: 8px 12px;
+    cursor: pointer; transition: background .12s ease;
+  }
+  .version-header:hover {
+    background: rgba(128,128,128,.06);
+  }
+  .expand-arrow {
+    display: inline-block; font-size: 9px; color: rgba(128,128,128,.7);
+    transition: transform .18s ease; user-select: none; width: 12px; text-align: center;
+  }
+  .version-item.expanded .expand-arrow {
+    transform: rotate(90deg);
+  }
+  .version-header .ver { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 500; }
+  .version-header .time { font-size: 11px; opacity:.55; white-space: nowrap; margin-left: 2px; }
+  .version-header .spacer { flex: 1; }
+  .version-header .actions { display:flex; align-items:center; gap: 6px; }
+
+  /* 更新记录面板 */
+  .changelog-panel {
+    background: rgba(128,128,128,.04); border-top: 1px dashed rgba(128,128,128,.15);
+    padding: 10px 14px 12px; font-size: 12px; line-height: 1.6;
+  }
+  @media (prefers-color-scheme: dark) {
+    .changelog-panel { background: rgba(0,0,0,.18); }
+  }
+  .changelog-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px; font-size: 11px; opacity: .75;
+  }
+  .changelog-title { font-weight: 600; color: #4d6bfe; }
+  @media (prefers-color-scheme: dark) { .changelog-title { color: #7e97ff; } }
+  .changelog-body {
+    max-height: 260px; overflow-y: auto; padding-right: 6px;
+  }
+  .changelog-loading, .changelog-empty, .changelog-error {
+    padding: 8px 0; font-size: 12px; opacity: .8;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .changelog-error { color: #d6313a; }
+  @media (prefers-color-scheme: dark) { .changelog-error { color: #ff7375; } }
+  .ext-link {
+    color: #4d6bfe; text-decoration: none; cursor: pointer;
+  }
+  .ext-link:hover { text-decoration: underline; }
+  @media (prefers-color-scheme: dark) { .ext-link { color: #7e97ff; } }
+
+  /* Markdown 排版 */
+  .md-heading {
+    font-weight: 600; margin: 10px 0 4px; color: inherit;
+  }
+  .md-heading:first-child { margin-top: 0; }
+  .md-h1, .md-h2 { font-size: 13px; }
+  .md-h3, .md-h4 { font-size: 12px; opacity: .9; }
+  .md-list {
+    margin: 4px 0 8px; padding-left: 18px;
+  }
+  .md-list li {
+    margin: 3px 0;
+  }
+  .md-p {
+    margin: 4px 0 6px;
+  }
+  .md-inline-code {
+    font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+    background: rgba(128,128,128,.14); padding: 1px 4px; border-radius: 3px;
+  }
+  .md-code-block {
+    background: rgba(128,128,128,.1); border-radius: 6px; padding: 6px 10px;
+    font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+    overflow-x: auto; margin: 6px 0;
+  }
   .confirm-box {
     display:flex; align-items:center; gap: 8px; flex-wrap: wrap; font-size: 12px;
   }
@@ -109,6 +177,54 @@ let switching = null; // { version, logs: string[] } | null
 let switchError = null;
 let confirmVersion = null; // 正在二次确认的版本号
 let shellUpdate = { status: 'idle', percent: 0, error: null }; // idle | downloading | downloaded
+
+let expandedVersions = new Set(); // 展开的版本，默认空（全部收缩）
+let kernelChangelogs = null;
+let changelogError = null;
+let changelogLoading = false;
+
+function inlineFormat(str) {
+  return str
+    .replace(/`([^`]+)`/g, '<code class="md-inline-code">$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="#" class="ext-link" data-url="$2">$1</a>');
+}
+
+function formatMarkdown(content) {
+  if (!content) return '';
+  let text = content
+    .replace(/<h[1-6][^>]*>(.*?)<\/h[1-6]>/gi, '\n### $1\n')
+    .replace(/<\/?[^>]+(>|$)/g, '');
+  text = esc(text);
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let inList = false;
+  for (let line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      continue;
+    }
+    if (/^\[.+?\]\(#.+?\)(\s*\|\s*\[.+?\]\(#.+?\))*$/.test(trimmed)) continue;
+    const headerMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headerMatch) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      const level = Math.min(headerMatch[1].length, 4);
+      out.push(`<div class="md-heading md-h${level}">${inlineFormat(headerMatch[2])}</div>`);
+      continue;
+    }
+    const listMatch = trimmed.match(/^[-*]\s+(.+)$/);
+    if (listMatch) {
+      if (!inList) { out.push('<ul class="md-list">'); inList = true; }
+      out.push(`<li>${inlineFormat(listMatch[1])}</li>`);
+      continue;
+    }
+    if (inList) { out.push('</ul>'); inList = false; }
+    out.push(`<p class="md-p">${inlineFormat(trimmed)}</p>`);
+  }
+  if (inList) out.push('</ul>');
+  return out.join('');
+}
 
 function relTime(iso) {
   if (!iso) return '';
@@ -220,7 +336,45 @@ function kernelStatusLine() {
   return `<span class="status">当前激活 <b>${activeLabel}</b> · <span class="tag recommended">跟随最新推荐版</span></span>`;
 }
 
-function versionRow(entry) {
+function renderChangelogPanel(version) {
+  if (changelogLoading && !kernelChangelogs) {
+    return `<div class="changelog-panel">
+      <div class="changelog-loading"><span class="spinner"></span> 正在拉取 GitHub 更新记录…</div>
+    </div>`;
+  }
+  if (changelogError && !kernelChangelogs) {
+    return `<div class="changelog-panel">
+      <div class="changelog-error">
+        <span>无法获取更新记录：${esc(changelogError)}</span>
+        <button class="retry" id="changelogRetryBtn">重试</button>
+        <button class="retry" data-url="https://github.com/deepseek-ai/deepseek-harness/releases">前往 GitHub 查看</button>
+      </div>
+    </div>`;
+  }
+  const rel = kernelChangelogs ? kernelChangelogs[version] : null;
+  if (!rel || !rel.body) {
+    const ghUrl = 'https://github.com/deepseek-ai/deepseek-harness/releases';
+    return `<div class="changelog-panel">
+      <div class="changelog-empty">
+        <span>此版本暂无 GitHub Release 记录</span>
+        <a href="#" class="ext-link" data-url="${esc(ghUrl)}">前往 GitHub Releases ↗</a>
+      </div>
+    </div>`;
+  }
+
+  const formattedHtml = formatMarkdown(rel.body);
+  const ghUrl = rel.htmlUrl || `https://github.com/deepseek-ai/deepseek-harness/releases/tag/${esc(rel.tag)}`;
+  return `<div class="changelog-panel">
+    <div class="changelog-header">
+      <span class="changelog-title">版本更新记录</span>
+      <a href="#" class="ext-link" data-url="${esc(ghUrl)}">在 GitHub 查看原文 ↗</a>
+    </div>
+    <div class="changelog-body">${formattedHtml}</div>
+  </div>`;
+}
+
+function versionItem(entry) {
+  const isExpanded = expandedVersions.has(entry.version);
   const isActive = STATE.kernel.activeVersion === entry.version;
   const busy = !!switching;
   let action;
@@ -237,12 +391,16 @@ function versionRow(entry) {
   } else {
     action = `<button data-act="ask-switch" data-version="${esc(entry.version)}" ${busy ? 'disabled' : ''}>切换到此版本</button>`;
   }
-  return `<div class="version-row">
-    <span class="ver">v${esc(entry.version)}</span>
-    ${tagFor(entry)}
-    <span class="time">${esc(relTime(entry.publishedAt))}</span>
-    <span class="spacer"></span>
-    <span class="actions">${action}</span>
+  return `<div class="version-item ${isExpanded ? 'expanded' : ''}">
+    <div class="version-header" data-ver="${esc(entry.version)}" title="点击${isExpanded ? '收起' : '展开'}更新记录">
+      <span class="expand-arrow">▶</span>
+      <span class="ver">v${esc(entry.version)}</span>
+      ${tagFor(entry)}
+      <span class="time">${esc(relTime(entry.publishedAt))}</span>
+      <span class="spacer"></span>
+      <span class="actions">${action}</span>
+    </div>
+    ${isExpanded ? renderChangelogPanel(entry.version) : ''}
   </div>`;
 }
 
@@ -258,7 +416,7 @@ function renderKernelCard() {
   } else if (k.entries.length === 0) {
     listHtml = `<div class="empty">暂无已发布版本</div>`;
   } else {
-    listHtml = `<div class="version-list">${k.entries.map(versionRow).join('')}</div>`;
+    listHtml = `<div class="version-list">${k.entries.map(versionItem).join('')}</div>`;
   }
   const errorHtml = switchError
     ? `<div class="error-box">切换失败：${esc(switchError)}</div>`
@@ -282,6 +440,25 @@ function render() {
   renderKernelCard();
 }
 
+async function loadChangelogs(bypassCache = false) {
+  changelogLoading = true;
+  changelogError = null;
+  renderKernelCard();
+  try {
+    const res = await window.updateAPI.getKernelChangelogs({ bypassCache });
+    if (res && res.ok && res.changelogs) {
+      kernelChangelogs = res.changelogs;
+    } else {
+      changelogError = res?.error || '获取更新记录失败';
+    }
+  } catch (err) {
+    changelogError = String(err.message || err);
+  } finally {
+    changelogLoading = false;
+    renderKernelCard();
+  }
+}
+
 async function refresh() {
   $('#refreshBtn').disabled = true;
   try {
@@ -289,6 +466,7 @@ async function refresh() {
   } finally {
     $('#refreshBtn').disabled = false;
     render();
+    loadChangelogs(true);
   }
 }
 
@@ -322,16 +500,54 @@ async function doSwitch(version) {
 }
 
 document.addEventListener('click', (ev) => {
-  const t = ev.target.closest('[data-act]');
-  if (!t) return;
-  if (t.dataset.act === 'ask-switch') {
-    confirmVersion = t.dataset.version;
-    render();
-  } else if (t.dataset.act === 'cancel-switch') {
-    confirmVersion = null;
-    render();
-  } else if (t.dataset.act === 'confirm-switch') {
-    doSwitch(t.dataset.version);
+  // 1. 外部链接
+  const link = ev.target.closest('[data-url]');
+  if (link) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    window.updateAPI.openExternal(link.dataset.url);
+    return;
+  }
+
+  // 2. 版本切换操作按钮（切换/确认/取消）
+  const act = ev.target.closest('[data-act]');
+  if (act) {
+    ev.stopPropagation();
+    if (act.dataset.act === 'ask-switch') {
+      confirmVersion = act.dataset.version;
+      renderKernelCard();
+    } else if (act.dataset.act === 'cancel-switch') {
+      confirmVersion = null;
+      renderKernelCard();
+    } else if (act.dataset.act === 'confirm-switch') {
+      doSwitch(act.dataset.version);
+    }
+    return;
+  }
+
+  // 3. Changelog 重试按钮
+  const retryChangelog = ev.target.closest('#changelogRetryBtn');
+  if (retryChangelog) {
+    ev.stopPropagation();
+    loadChangelogs(true);
+    return;
+  }
+
+  // 4. 版本 Header 点击：切换收缩/展开（默认收缩）
+  const header = ev.target.closest('.version-header');
+  if (header) {
+    const ver = header.dataset.ver;
+    if (ver) {
+      if (expandedVersions.has(ver)) {
+        expandedVersions.delete(ver);
+      } else {
+        expandedVersions.add(ver);
+        if (!kernelChangelogs && !changelogLoading) {
+          loadChangelogs();
+        }
+      }
+      renderKernelCard();
+    }
   }
 });
 
@@ -356,6 +572,7 @@ window.updateAPI.onShellProgress((percent) => {
 async function load() {
   STATE = await window.updateAPI.getState();
   render();
+  loadChangelogs();
 }
 load();
 </script>

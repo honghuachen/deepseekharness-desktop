@@ -12,7 +12,13 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { fetchAllKernelVersions, classifyTag } = require('../src/main/kernel-versions.js');
+const {
+  fetchAllKernelVersions,
+  classifyTag,
+  normalizeReleaseTag,
+  fetchKernelReleases,
+  clearKernelReleasesCache,
+} = require('../src/main/kernel-versions.js');
 
 let failed = 0;
 async function t(name, fn) {
@@ -115,6 +121,95 @@ async function main() {
       assert.equal(result, null);
     } finally {
       global.fetch = orig;
+    }
+  });
+
+  process.stdout.write('normalizeReleaseTag:\n');
+  await t("前缀 'dsh-v0.1.5-rc.1' → 0.1.5-rc.1", () => {
+    assert.equal(normalizeReleaseTag('dsh-v0.1.5-rc.1'), '0.1.5-rc.1');
+  });
+  await t("前缀 'v0.1.5-alpha.2' → 0.1.5-alpha.2", () => {
+    assert.equal(normalizeReleaseTag('v0.1.5-alpha.2'), '0.1.5-alpha.2');
+  });
+  await t("无前缀 '0.1.3-alpha.1' → 0.1.3-alpha.1", () => {
+    assert.equal(normalizeReleaseTag('0.1.3-alpha.1'), '0.1.3-alpha.1');
+  });
+  await t('空或非字符串 → 空字符串', () => {
+    assert.equal(normalizeReleaseTag(''), '');
+    assert.equal(normalizeReleaseTag(null), '');
+    assert.equal(normalizeReleaseTag(undefined), '');
+  });
+
+  process.stdout.write('fetchKernelReleases:\n');
+  await t('正确拉取并解析 releases 映射表及缓存', async () => {
+    clearKernelReleasesCache();
+    const mockReleases = [
+      {
+        tag_name: 'dsh-v0.1.5-rc.1',
+        name: 'v0.1.5-rc.1',
+        published_at: '2026-09-10T03:09:00Z',
+        body: '## 0.1.5-rc.1 更新说明',
+        html_url: 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.5-rc.1',
+      },
+      {
+        tag_name: 'v0.1.5-alpha.2',
+        name: 'v0.1.5-alpha.2',
+        published_at: '2026-09-09T14:23:10Z',
+        body: 'Alpha 2 变更',
+        html_url: 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/v0.1.5-alpha.2',
+      },
+    ];
+
+    let fetchCount = 0;
+    const orig = global.fetch;
+    global.fetch = async () => {
+      fetchCount++;
+      return new Response(JSON.stringify(mockReleases), { status: 200 });
+    };
+
+    try {
+      const res1 = await fetchKernelReleases();
+      assert.ok(res1, '返回非 null');
+      assert.equal(fetchCount, 1);
+      assert.ok(res1['0.1.5-rc.1']);
+      assert.equal(res1['0.1.5-rc.1'].body, '## 0.1.5-rc.1 更新说明');
+      assert.equal(res1['0.1.5-rc.1'].tag, 'dsh-v0.1.5-rc.1');
+      assert.ok(res1['0.1.5-alpha.2']);
+
+      // 命中缓存测试
+      const res2 = await fetchKernelReleases();
+      assert.equal(fetchCount, 1, '命中缓存时不应发起二次请求');
+      assert.equal(res2['0.1.5-rc.1'].body, '## 0.1.5-rc.1 更新说明');
+
+      // bypassCache 测试
+      const res3 = await fetchKernelReleases({ bypassCache: true });
+      assert.equal(fetchCount, 2, 'bypassCache 时应发起新请求');
+    } finally {
+      global.fetch = orig;
+      clearKernelReleasesCache();
+    }
+  });
+
+  await t('GitHub HTTP 错误时返回 null', async () => {
+    clearKernelReleasesCache();
+    await withMockFetch(new Response('Rate limit', { status: 403 }), async () => {
+      const result = await fetchKernelReleases({ bypassCache: true });
+      assert.equal(result, null);
+    });
+  });
+
+  await t('GitHub 网络异常时返回 null', async () => {
+    clearKernelReleasesCache();
+    const orig = global.fetch;
+    global.fetch = async () => {
+      throw new Error('ETIMEDOUT');
+    };
+    try {
+      const result = await fetchKernelReleases({ bypassCache: true });
+      assert.equal(result, null);
+    } finally {
+      global.fetch = orig;
+      clearKernelReleasesCache();
     }
   });
 
