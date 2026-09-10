@@ -134,6 +134,42 @@ function stripForeignInsertBlocks(text, removedNames) {
   return out.join('\n').replace(/\n{3,}/g, '\n\n');
 }
 
+/**
+ * 向 cordis.patch.yml 追加一个插件的 insert 块（若尚未存在）
+ */
+function appendPatchInsert(patchText, pluginName) {
+  const inserts = parsePatchInserts(patchText);
+  if (inserts.some((ins) => ins.name === pluginName)) {
+    return patchText;
+  }
+  const block = `\n- insert:\n    - id: ${pluginName}\n      name: ${pluginName}\n`;
+  return (patchText.trimEnd() + '\n' + block).replace(/^\n+/, '');
+}
+
+/**
+ * 判断某个已安装插件是否为 DSH Bundle（即自身 package.json 声明了 dsh.bundle.patch）。
+ * 只有具备 dsh.bundle 声明的插件才可以写入 package.json 的 dsh.profile.bundles，
+ * 否则 DSH 启动时会抛错：profile bundle "..." declares no dsh.bundle in its package.json。
+ */
+function isBundlePackage(profileDir, pkgName) {
+  try {
+    const nmPkgPath = path.join(profileDir, 'node_modules', ...pkgName.split('/'), 'package.json');
+    if (fsSync.existsSync(nmPkgPath)) {
+      const data = JSON.parse(fsSync.readFileSync(nmPkgPath, 'utf8'));
+      return Boolean(data.dsh?.bundle?.patch);
+    }
+  } catch {}
+  // 若 node_modules 中不存在（如单元测试桩环境或未安装阶段），若 bundles 中已有该项则保留为 true
+  try {
+    const pfile = path.join(profileDir, 'package.json');
+    if (fsSync.existsSync(pfile)) {
+      const pdata = JSON.parse(fsSync.readFileSync(pfile, 'utf8'));
+      if (pdata.dsh?.profile?.bundles?.includes(pkgName)) return true;
+    }
+  } catch {}
+  return true;
+}
+
 function runPnpm(nodeBin, pnpmCjs, args, cwd, onLine) {
   return new Promise((resolve, reject) => {
     const nodeDir = path.dirname(nodeBin);
@@ -944,6 +980,122 @@ async function sanitizeProfile(profileDir, opts = {}) {
   return { changed: removed.length > 0, removed };
 }
 
+/**
+ * 向 profile 中安装单个第三方插件。
+ * 1. 验证非官方包、profileDir 存在；
+ * 2. 写入 package.json dependencies 并确保加入 dsh.profile.bundles；
+ * 3. 运行 pnpm install 并校验；
+ * 4. 失败自动回滚 package.json。
+ */
+async function installPluginToProfile(profileDir, pluginInfo, { nodeBin, pnpmCjs, log = () => {} } = {}) {
+  const name = (pluginInfo?.packageName || pluginInfo?.name)?.trim();
+  if (!name) throw new Error('缺少插件名称');
+  if (isOfficial(name)) throw new Error(`官方包 ${name} 不允许通过此途径安装`);
+
+  const pkgFile = path.join(profileDir, 'package.json');
+  const pkg = readJson(pkgFile);
+  if (!pkg) throw new Error('profile 目录不存在或 package.json 无效');
+
+  pkg.dependencies = pkg.dependencies || {};
+  pkg.dsh = pkg.dsh || {};
+  pkg.dsh.profile = pkg.dsh.profile || {};
+  pkg.dsh.profile.bundles = pkg.dsh.profile.bundles || [];
+
+  let rawSpec = String(pluginInfo.installSpec || pluginInfo.targetVersion || '').trim();
+  let targetRange = 'latest';
+  if (
+    rawSpec.startsWith('github:') ||
+    rawSpec.startsWith('git+') ||
+    rawSpec.startsWith('http:') ||
+    rawSpec.startsWith('https:') ||
+    rawSpec.startsWith('file:')
+  ) {
+    targetRange = rawSpec;
+  } else if (!rawSpec || rawSpec === name || rawSpec === 'latest') {
+    targetRange = 'latest';
+  } else if (/^[\^~>=<]/.test(rawSpec)) {
+    targetRange = rawSpec;
+  } else if (/^\d+\.\d+/.test(rawSpec)) {
+    targetRange = `^${rawSpec}`;
+  } else {
+    targetRange = 'latest';
+  }
+
+  // 备份 package.json
+  const backupDir = path.join(profileDir, `.sanitized-backup-${Date.now()}`);
+  await fsPromises.mkdir(backupDir, { recursive: true });
+  await fsPromises.copyFile(pkgFile, path.join(backupDir, 'package.json'));
+
+  try {
+    pkg.dependencies[name] = targetRange;
+    pkg.dsh.profile.disabledBundles = (pkg.dsh.profile.disabledBundles || []).filter((b) => b !== name);
+    // 先保存 dependencies，安装后再根据 node_modules 检查是否为 bundle
+    await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
+    log(`[guard] 开始安装插件 ${name} (${targetRange}) 到 ${path.basename(profileDir)}…`);
+
+    if (!nodeBin || !pnpmCjs) {
+      return { ok: false, name, error: '缺少 Node 或 pnpm 执行环境' };
+    }
+
+    await runPnpm(
+      nodeBin,
+      pnpmCjs,
+      [
+        'install',
+        '--no-frozen-lockfile',
+        '--config.dangerously-allow-all-builds=true',
+        '--config.strict-dep-builds=false',
+      ],
+      profileDir,
+      (l) => log(`[guard]   ${l}`),
+    );
+
+    const nmPkgFile = path.join(profileDir, 'node_modules', ...name.split('/'), 'package.json');
+    if (!fsSync.existsSync(nmPkgFile)) {
+      throw new Error(`pnpm install 完成后未找到 ${name} 的 node_modules 目录`);
+    }
+
+    const installed = readJson(nmPkgFile);
+    const installedVer = installed?.version || 'unknown';
+
+    if (targetRange === 'latest' && installedVer !== 'unknown') {
+      pkg.dependencies[name] = `^${installedVer}`;
+    }
+
+    // 安装成功后默认启用：根据是否具备 dsh.bundle 声明分流
+    if (isBundlePackage(profileDir, name)) {
+      if (!pkg.dsh.profile.bundles.includes(name)) {
+        pkg.dsh.profile.bundles.push(name);
+      }
+    } else {
+      // 非 bundle 插件：绝不能在 bundles 中，挂载到 cordis.patch.yml
+      const patchFile = path.join(profileDir, 'cordis.patch.yml');
+      const patchContent = fsSync.existsSync(patchFile) ? fsSync.readFileSync(patchFile, 'utf8') : '';
+      const newPatchContent = appendPatchInsert(patchContent, name);
+      await fsPromises.writeFile(patchFile, newPatchContent);
+      pkg.dsh.profile.bundles = (pkg.dsh.profile.bundles || []).filter((b) => b !== name);
+    }
+
+    await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
+
+    log(`[guard] 插件 ${name} (v${installedVer}) 安装成功并已默认启用`);
+    return {
+      ok: true,
+      name,
+      version: installedVer,
+      range: pkg.dependencies[name],
+    };
+  } catch (err) {
+    log(`[guard] 安装插件 ${name} 失败: ${err.message}，正在回滚…`);
+    await fsPromises.copyFile(path.join(backupDir, 'package.json'), pkgFile).catch(() => {});
+    return {
+      ok: false,
+      name,
+      error: err.message,
+    };
+  }
+}
+
 /** 是否已经清洗过（marker 落在 DSH_HOME 根） */
 function sanitizedMarker(home) {
   return path.join(home, '.dsh-web-sanitized');
@@ -957,13 +1109,60 @@ function hasSanitizeMarker(home) {
   return fsSync.existsSync(sanitizedMarker(home));
 }
 
+async function togglePluginBundle(profileDir, pluginName, enable = true) {
+  const pkgFile = path.join(profileDir, 'package.json');
+  const patchFile = path.join(profileDir, 'cordis.patch.yml');
+  const pkg = readJson(pkgFile);
+  if (!pkg) throw new Error('profile 目录不存在或 package.json 无效');
+
+  pkg.dsh = pkg.dsh || {};
+  pkg.dsh.profile = pkg.dsh.profile || {};
+  const bundles = (pkg.dsh.profile.bundles || []).map(String);
+  const disabledBundles = (pkg.dsh.profile.disabledBundles || []).map(String);
+  const isBundle = isBundlePackage(profileDir, pluginName);
+
+  let patchContent = fsSync.existsSync(patchFile) ? fsSync.readFileSync(patchFile, 'utf8') : '';
+
+  if (isBundle) {
+    if (enable) {
+      if (!bundles.includes(pluginName)) bundles.push(pluginName);
+      pkg.dsh.profile.disabledBundles = disabledBundles.filter((b) => b !== pluginName);
+      pkg.dsh.profile.bundles = [...new Set(bundles)];
+    } else {
+      if (!disabledBundles.includes(pluginName)) disabledBundles.push(pluginName);
+      pkg.dsh.profile.disabledBundles = [...new Set(disabledBundles)];
+      pkg.dsh.profile.bundles = bundles.filter((b) => b !== pluginName);
+    }
+  } else {
+    // 非 bundle 插件：绝不能在 bundles 中，通过 cordis.patch.yml 挂载启用或移除停用
+    pkg.dsh.profile.bundles = bundles.filter((b) => b !== pluginName);
+    if (enable) {
+      patchContent = appendPatchInsert(patchContent, pluginName);
+      pkg.dsh.profile.disabledBundles = disabledBundles.filter((b) => b !== pluginName);
+      await fsPromises.writeFile(patchFile, patchContent);
+    } else {
+      patchContent = stripForeignInsertBlocks(patchContent, new Set([pluginName]));
+      if (!disabledBundles.includes(pluginName)) disabledBundles.push(pluginName);
+      pkg.dsh.profile.disabledBundles = [...new Set(disabledBundles)];
+      await fsPromises.writeFile(patchFile, patchContent);
+    }
+  }
+
+  await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
+  return { ok: true, name: pluginName, enabled: enable, bundles: pkg.dsh.profile.bundles };
+}
+
 module.exports = {
   isOfficial,
   inventoryProfile,
   parsePatchInserts,
   stripForeignInsertBlocks,
+  appendPatchInsert,
+  isBundlePackage,
   removePluginsFromProfile,
   sanitizeProfile,
+  installPluginToProfile,
+  togglePluginBundle,
   markSanitized,
   hasSanitizeMarker,
   createRegistryChecker,

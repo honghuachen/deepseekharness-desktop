@@ -1,7 +1,7 @@
 {
   "name": "deepseek-harness-web",
   "productName": "DSH Web",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "窗口化承载官方 DeepSeek Harness Web 壳的桌面容器，每次启动自动检测并更新官方运行时",
   "license": "MIT",
   "private": true,
@@ -19,7 +19,7 @@
   "scripts": {
     "start": "electron .",
     "fetch-tools": "node scripts/fetch-tools.mjs",
-    "test": "node scripts/badge-test.mjs && node scripts/plugin-guard-test.mjs && node scripts/test-plugin-update.mjs && node scripts/test-token-usage.mjs && node scripts/kernel-versions-test.mjs && node scripts/shell-update-test.mjs && node scripts/shell-auto-updater-test.mjs && node scripts/kernel-switch-test.mjs",
+    "test": "node scripts/badge-test.mjs && node scripts/plugin-guard-test.mjs && node scripts/test-plugin-update.mjs && node scripts/test-token-usage.mjs && node scripts/kernel-versions-test.mjs && node scripts/shell-update-test.mjs && node scripts/shell-auto-updater-test.mjs && node scripts/kernel-switch-test.mjs && node scripts/update-monitor-test.mjs && node scripts/preload-dom-test.mjs && node scripts/market-service-test.mjs",
     "test:e2e": "node scripts/e2e-update-test.mjs",
     "test:plugin-update": "node scripts/test-plugin-update.mjs",
     "test:token-usage": "node scripts/test-token-usage.mjs",

@@ -129,6 +129,18 @@ Third-party containers (e.g. the older DSH Desktop) may push community plugins i
 
 > Note: the `desktop` profile belongs to the older DSH Desktop. Removing plugins from it will break that older shell's marketplace features (that's the intended effect of decontamination) — quit the older shell first if you still use it. To install a plugin, use the official method: `dsh plugin --profile <name> add <package>`.
 
+## Community plugin marketplace
+
+Menu **DSH Web → Community Plugin Marketplace…** (⌘⇧M, or switch to that tab inside the "Manage Third-Party Plugins" window):
+
+![Community plugin marketplace window: browse a curated Top 10 per category, search, jump to a plugin's open-source homepage, and one-click install into a chosen profile](docs/screenshots/plugin-market.png)
+
+- Aggregates high-star, high-install plugins from the mainstream community marketplaces (dsh-1024store, dsh-market) into 11 categories (Tools & Capabilities, UI Enhancements, Dev & Runtime, Skill Packs, Conversation & Messaging, Models & Providers, Workflow Automation, Memory Management, Themes, Notifications, Fun & Games), each curated down to a Top 10; duplicate listings of the same GitHub repo/package are merged.
+- Real-time search by plugin name, Chinese description, author, or keyword, plus category filtering.
+- Already-installed plugins are flagged on their card so you don't install them twice; pick a target profile and click "Install" to write the dependency into that profile's `package.json` and `dsh.profile.bundles` directly — no manual file editing needed.
+- Click a plugin's name or its "open-source" badge to open its GitHub/npm homepage in the system default browser.
+- Marketplace data is cached locally for 12 hours; if the network is unavailable or the API errors out, it falls back seamlessly to a bundled Top 100 seed dataset, so the list is always usable.
+
 ## Token usage & cost stats
 
 Menu **DSH Web → Token 用量统计…** (⌘⇧T) opens a dedicated window that tallies token usage and estimated cost across every session under `~/.dsh/sessions`:

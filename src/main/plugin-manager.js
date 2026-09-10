@@ -12,14 +12,20 @@ const {
   inventoryProfile,
   removePluginsFromProfile,
   isOfficial,
+  isBundlePackage,
+  appendPatchInsert,
+  parsePatchInserts,
   createRegistryChecker,
   createGitHubChecker,
   checkProfileUpdates,
   updatePlugin,
   updatePlugins,
+  installPluginToProfile,
+  togglePluginBundle,
   parseGitHubSpec,
   parseRepoUrl,
 } = require('./plugin-guard');
+const { fetchMarketTop100 } = require('./market/market-service');
 
 let win = null; // 单例窗口
 // 进程内单例 registry checker 与 github checker，跨调用复用缓存（5 分钟 TTL）
@@ -33,6 +39,32 @@ let githubChecker = null;
 function getGitHubChecker(log) {
   if (!githubChecker) githubChecker = createGitHubChecker({ log });
   return githubChecker;
+}
+
+// 缓存内置市场种子元数据，用于增强本地已安装插件的项目显示名称与描述
+let marketMetaMap = null;
+function getMarketMetaMap() {
+  if (marketMetaMap) return marketMetaMap;
+  marketMetaMap = new Map();
+  try {
+    const seedPath = path.join(__dirname, 'market', 'market-seed.json');
+    if (fsSync.existsSync(seedPath)) {
+      const list = JSON.parse(fsSync.readFileSync(seedPath, 'utf8'));
+      if (Array.isArray(list)) {
+        for (const item of list) {
+          const meta = {
+            displayName: item.displayName || item.name,
+            description: item.description || '',
+            githubUrl: item.githubUrl || null,
+          };
+          if (item.packageName) marketMetaMap.set(item.packageName.toLowerCase(), meta);
+          if (item.name) marketMetaMap.set(item.name.toLowerCase(), meta);
+          if (item.id) marketMetaMap.set(item.id.toLowerCase(), meta);
+        }
+      }
+    }
+  } catch {}
+  return marketMetaMap;
 }
 
 // 上次更新检查结果的持久化缓存（dshHome/.plugin-updates.json）：
@@ -60,6 +92,23 @@ function writeUpdatesCache(dshHome, data) {
     // eslint-disable-next-line no-console
     console.warn(`[pm] 写更新缓存失败: ${err.message}`);
   }
+}
+
+/**
+ * 汇总更新缓存里所有 profile 的「有新版」条目数量，供全局升级徽标使用。
+ * 仅读已有缓存（由插件管理器 checkUpdates 写入），不发起新的网络请求。
+ */
+function getPluginUpdatesSummary(dshHome) {
+  const cache = readUpdatesCache(dshHome);
+  let count = 0;
+  const profiles = cache?.profiles;
+  if (profiles && typeof profiles === 'object') {
+    for (const list of Object.values(profiles)) {
+      if (!Array.isArray(list)) continue;
+      count += list.filter((u) => u?.status === 'outdated').length;
+    }
+  }
+  return { hasUpdate: count > 0, count };
 }
 
 /**
@@ -96,11 +145,72 @@ function buildInventory(dshHome) {
       const inv = inventoryProfile(dir);
       if (!inv.exists) return null;
 
+      // 默认启用机制：已安装的第三方依赖若未显式加入 disabledBundles，自动确保处于启用状态
+      const pkgPath = path.join(dir, 'package.json');
+      const patchPath = path.join(dir, 'cordis.patch.yml');
+      try {
+        const rawPkg = JSON.parse(fsSync.readFileSync(pkgPath, 'utf8'));
+        const disabledSet = new Set((rawPkg.dsh?.profile?.disabledBundles || []).map(String));
+        const bundleSet = new Set((rawPkg.dsh?.profile?.bundles || []).map(String));
+        let pkgChanged = false;
+        let patchChanged = false;
+        let patchContent = fsSync.existsSync(patchPath) ? fsSync.readFileSync(patchPath, 'utf8') : '';
+        const existingInserts = new Set(parsePatchInserts(patchContent).map((ins) => ins.name));
+
+        for (const dep of inv.deps) {
+          if (dep.official) continue;
+          const isBundle = isBundlePackage(dir, dep.name);
+
+          if (!isBundle) {
+            // 非 bundle 包（如 dsh-mcp-manager）绝不能出现在 bundles 中，否则 dsh 启动报错
+            if (bundleSet.has(dep.name)) {
+              bundleSet.delete(dep.name);
+              pkgChanged = true;
+            }
+            // 若用户未显式禁用，且未在 cordis.patch.yml 中，则默认在 cordis.patch.yml 中启用
+            if (!disabledSet.has(dep.name) && !existingInserts.has(dep.name)) {
+              patchContent = appendPatchInsert(patchContent, dep.name);
+              existingInserts.add(dep.name);
+              patchChanged = true;
+            }
+          } else {
+            // 是 bundle 包：若未显式禁用，确保加入 bundles
+            if (!disabledSet.has(dep.name) && !bundleSet.has(dep.name)) {
+              bundleSet.add(dep.name);
+              pkgChanged = true;
+            }
+          }
+        }
+
+        // 清理 bundles 中任何非 bundle 的第三方包（防御性防崩溃）
+        for (const b of [...bundleSet]) {
+          if (!isOfficial(b) && !isBundlePackage(dir, b)) {
+            bundleSet.delete(b);
+            pkgChanged = true;
+          }
+        }
+
+        if (pkgChanged) {
+          rawPkg.dsh = rawPkg.dsh || {};
+          rawPkg.dsh.profile = rawPkg.dsh.profile || {};
+          rawPkg.dsh.profile.bundles = [...bundleSet];
+          fsSync.writeFileSync(pkgPath, JSON.stringify(rawPkg, null, 2) + '\n');
+          inv.bundles = [...bundleSet];
+        }
+
+        if (patchChanged) {
+          fsSync.writeFileSync(patchPath, patchContent);
+          inv.inserts = parsePatchInserts(patchContent).map((b) => ({ ...b, official: isOfficial(b.name ?? '') }));
+        }
+      } catch {}
+
       // 合并依赖与补丁层引用为统一的条目列表
       const byName = new Map();
       for (const d of inv.deps) {
         let githubUrl = null;
         let npmUrl = null;
+        let displayName = null;
+        let description = null;
 
         if (!d.official) {
           const ghSpec = parseGitHubSpec(d.range);
@@ -119,12 +229,27 @@ function buildInventory(dshHome) {
               if (repoUrl) {
                 githubUrl = repoUrl;
               }
+              if (installedPkg.displayName && typeof installedPkg.displayName === 'string') {
+                displayName = installedPkg.displayName;
+              }
+              if (installedPkg.description && typeof installedPkg.description === 'string') {
+                description = installedPkg.description;
+              }
             } catch {}
+          }
+
+          // 关联社区市场元数据（如 DeepSeek-Balance-Whale-Widget, MemOS 等）
+          const meta = getMarketMetaMap().get(d.name.toLowerCase());
+          if (meta) {
+            if (meta.displayName) displayName = meta.displayName;
+            if (meta.description && !description) description = meta.description;
           }
         }
 
         byName.set(d.name, {
           name: d.name,
+          displayName,
+          description,
           range: d.range,
           official: d.official,
           inBundle: inv.bundles.includes(d.name),
@@ -245,6 +370,7 @@ function registerIpc(context) {
         checkedAt: new Date().toISOString(),
         profiles: cacheProfiles,
       });
+      context.onUpdatesCacheChanged?.();
       return { updates };
     }
     if (cmd === 'update') {
@@ -267,7 +393,10 @@ function registerIpc(context) {
           registry: reg,
           githubChecker: gh,
         });
-        if (result.ok && result.from !== result.to) invalidateUpdatesCache(context.dshHome(), profile, [name]);
+        if (result.ok && result.from !== result.to) {
+          invalidateUpdatesCache(context.dshHome(), profile, [name]);
+          context.onUpdatesCacheChanged?.();
+        }
         return { ...result, profile, profiles: buildInventory(context.dshHome()) };
       } catch (err) {
         context.log?.(`[pm] 更新失败 ${profile}/${name}: ${err.message}`);
@@ -307,7 +436,10 @@ function registerIpc(context) {
       });
 
       const okNames = report.filter((r) => r.ok && r.from !== r.to).map((r) => r.name);
-      if (okNames.length) invalidateUpdatesCache(context.dshHome(), profile, okNames);
+      if (okNames.length) {
+        invalidateUpdatesCache(context.dshHome(), profile, okNames);
+        context.onUpdatesCacheChanged?.();
+      }
       return { report, profile, profiles: buildInventory(context.dshHome()) };
     }
     if (cmd === 'openExternal') {
@@ -318,17 +450,126 @@ function registerIpc(context) {
       }
       return { ok: false, error: '无效 URL' };
     }
+    if (cmd === 'marketList' || cmd === 'marketRefresh') {
+      const forceRefresh = cmd === 'marketRefresh';
+      const home = context.dshHome();
+      const marketData = await fetchMarketTop100({
+        dshHome: home,
+        forceRefresh,
+        log: context.log,
+      });
+
+      const inventory = buildInventory(home);
+      const installedMap = new Map();
+      for (const p of inventory) {
+        for (const item of p.items) {
+          if (item.official) continue; // 官方系统核心依赖不计入第三方插件市场匹配
+          const key = (item.rawName || item.name).toLowerCase();
+          const list = installedMap.get(key) || [];
+          list.push(p.profile);
+          installedMap.set(key, list);
+        }
+      }
+
+      const enrichedPlugins = marketData.plugins.map((plugin) => {
+        const namesToCheck = [
+          plugin.packageName,
+          plugin.name,
+          plugin.displayName,
+          plugin.installSpec,
+        ]
+          .filter(Boolean)
+          .map((x) => String(x).toLowerCase())
+          .filter((x) => x !== 'dsh' && x !== 'plugin');
+
+        let matchedProfiles = [];
+        for (const [installedKey, profiles] of installedMap.entries()) {
+          if (namesToCheck.includes(installedKey)) {
+            matchedProfiles = [...new Set([...matchedProfiles, ...profiles])];
+          }
+        }
+        return {
+          ...plugin,
+          isInstalled: matchedProfiles.length > 0,
+          installedProfiles: matchedProfiles,
+        };
+      });
+
+      return {
+        ...marketData,
+        plugins: enrichedPlugins,
+        availableProfiles: inventory.map((p) => p.profile),
+      };
+    }
+    if (cmd === 'toggleBundle') {
+      const { profile, name, enable } = payload ?? {};
+      if (!profile || !name) throw new Error('缺少 profile 或插件名称');
+      const home = context.dshHome();
+      const profileDir = path.join(home, 'profiles', profile);
+      const isBundle = isBundlePackage(profileDir, name);
+      const res = await togglePluginBundle(profileDir, name, enable);
+      return {
+        ...res,
+        profile,
+        // Bundle 插件修改 dsh.profile.bundles 后需重启 DSH 服务才能生效；
+        // 非 Bundle 插件修改 cordis.patch.yml 后由 DSH 内核自动热重载，无需重启。
+        needsRestart: isBundle,
+        profiles: buildInventory(home),
+      };
+    }
+    if (cmd === 'restartService') {
+      if (typeof context.restartService !== 'function') {
+        return { ok: false, error: 'restartService 回调未注册' };
+      }
+      return await context.restartService();
+    }
+    if (cmd === 'marketInstall') {
+      const { plugin, profile = 'web' } = payload ?? {};
+      if (!plugin || (!plugin.name && !plugin.packageName && !plugin.displayName)) {
+        throw new Error('缺少要安装的插件信息');
+      }
+
+      const home = context.dshHome();
+      const profileDir = path.join(home, 'profiles', profile);
+      if (!fsSync.existsSync(path.join(profileDir, 'package.json'))) {
+        return { ok: false, error: `Profile ${profile} 不存在` };
+      }
+
+      const nodeBin = context.getNodeBin ? await context.getNodeBin() : undefined;
+      const res = await installPluginToProfile(profileDir, plugin, {
+        nodeBin,
+        pnpmCjs: context.pnpmCjs,
+        log: context.log,
+      });
+
+      return {
+        ...res,
+        profile,
+        profiles: buildInventory(home),
+      };
+    }
     throw new Error(`未知命令 ${cmd}`);
   };
   ipcMain.handle('pm', handler);
   return () => ipcMain.removeHandler('pm');
 }
 
-function openPluginManager({ dshHome, pnpmCjs, getNodeBin, log = () => {} } = {}) {
+function openPluginManager({
+  dshHome,
+  pnpmCjs,
+  getNodeBin,
+  restartService,
+  onUpdatesCacheChanged,
+  initialTab = 'installed',
+  log = () => {},
+} = {}) {
   if (!dshHome) throw new Error('openPluginManager 需要 dshHome');
   if (win && !win.isDestroyed()) {
     win.show();
     win.focus();
+    if (initialTab) {
+      win.webContents.send('pm:switch-tab', initialTab);
+    }
     return win;
   }
 
@@ -336,15 +577,17 @@ function openPluginManager({ dshHome, pnpmCjs, getNodeBin, log = () => {} } = {}
     dshHome: typeof dshHome === 'function' ? dshHome : () => dshHome,
     pnpmCjs,
     getNodeBin,
+    restartService,
+    onUpdatesCacheChanged,
     log,
   });
 
   win = new BrowserWindow({
-    width: 900,
-    height: 680,
-    minWidth: 680,
-    minHeight: 480,
-    title: '管理第三方插件',
+    width: 940,
+    height: 720,
+    minWidth: 720,
+    minHeight: 520,
+    title: '第三方插件管理与社区市场',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'plugin-manager-preload.cjs'),
@@ -358,7 +601,14 @@ function openPluginManager({ dshHome, pnpmCjs, getNodeBin, log = () => {} } = {}
     }
     return { action: 'deny' };
   });
-  win.loadFile(path.join(__dirname, 'pages', 'plugins.html'));
+  win.loadFile(path.join(__dirname, 'pages', 'plugins.html'), {
+    query: { tab: initialTab },
+  });
+  win.webContents.once('did-finish-load', () => {
+    if (initialTab) {
+      win.webContents.send('pm:switch-tab', initialTab);
+    }
+  });
   // 开发诊断：DSH_WEB_DEV_PM_DUMP=<路径> 时导出窗口文本
   win.webContents.once('did-finish-load', () => {
     if (!process.env.DSH_WEB_DEV_PM_DUMP) return;
@@ -376,4 +626,10 @@ function openPluginManager({ dshHome, pnpmCjs, getNodeBin, log = () => {} } = {}
   return win;
 }
 
-module.exports = { openPluginManager, buildInventory, readUpdatesCache, writeUpdatesCache };
+module.exports = {
+  openPluginManager,
+  buildInventory,
+  readUpdatesCache,
+  writeUpdatesCache,
+  getPluginUpdatesSummary,
+};

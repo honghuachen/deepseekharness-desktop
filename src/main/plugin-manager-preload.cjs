@@ -14,4 +14,11 @@ contextBridge.exposeInMainWorld('pluginAPI', {
   updateAll: (profile, names) => ipcRenderer.invoke('pm', 'updateAll', { profile, names }),
   // 打开系统外部浏览器链接
   openExternal: (url) => ipcRenderer.invoke('pm', 'openExternal', { url }),
+  // 插件市场
+  marketList: () => ipcRenderer.invoke('pm', 'marketList'),
+  marketRefresh: () => ipcRenderer.invoke('pm', 'marketRefresh'),
+  marketInstall: (plugin, profile) => ipcRenderer.invoke('pm', 'marketInstall', { plugin, profile }),
+  toggleBundle: (profile, name, enable) => ipcRenderer.invoke('pm', 'toggleBundle', { profile, name, enable }),
+  restartService: () => ipcRenderer.invoke('pm', 'restartService'),
+  onSwitchTab: (cb) => ipcRenderer.on('pm:switch-tab', (_e, tab) => cb(tab)),
 });

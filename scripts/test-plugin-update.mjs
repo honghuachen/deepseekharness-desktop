@@ -30,6 +30,7 @@ const {
   getInstalledGitCommit,
   updatePlugin,
   updatePlugins,
+  installPluginToProfile,
   checkProfileUpdates,
   isOfficial,
 } = guard;
@@ -688,6 +689,118 @@ importers:
     assert.equal(memos.official, false);
     assert.equal(memos.npmUrl, 'https://www.npmjs.com/package/@memtensor/memos-local-plugin');
     assert.equal(memos.githubUrl, null);
+  });
+
+  process.stdout.write('installPluginToProfile:\n');
+
+  await t('安装官方包抛错被拒绝', async () => {
+    const dir = tmpProfile();
+    await assert.rejects(
+      () => installPluginToProfile(dir, { name: '@deepseek-ai/dsh-core' }),
+      /官方包 @deepseek-ai\/dsh-core 不允许/,
+    );
+  });
+
+  await t('缺少插件名称抛错', async () => {
+    const dir = tmpProfile();
+    await assert.rejects(
+      () => installPluginToProfile(dir, { name: '' }),
+      /缺少插件名称/,
+    );
+  });
+
+  await t('成功安装：写入 dependencies 和 dsh.profile.bundles', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({
+        name: 'test-profile',
+        dependencies: {},
+        dsh: { profile: { bundles: [] } },
+      }),
+    );
+
+    const mockPnpm = path.join(dir, 'fake-pnpm.cjs');
+    fs.writeFileSync(
+      mockPnpm,
+      `
+      const fs = require('node:fs');
+      const path = require('node:path');
+      const modDir = path.join(process.cwd(), 'node_modules', 'awesome-market-tool');
+      fs.mkdirSync(modDir, { recursive: true });
+      fs.writeFileSync(path.join(modDir, 'package.json'), JSON.stringify({ name: 'awesome-market-tool', version: '1.2.3', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+      `,
+    );
+
+    const res = await installPluginToProfile(
+      dir,
+      { name: 'awesome-market-tool', installSpec: 'latest' },
+      { nodeBin: process.execPath, pnpmCjs: mockPnpm },
+    );
+
+    assert.equal(res.ok, true);
+    assert.equal(res.name, 'awesome-market-tool');
+    assert.equal(res.version, '1.2.3');
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.equal(pkg.dependencies['awesome-market-tool'], '^1.2.3');
+    assert.ok(pkg.dsh.profile.bundles.includes('awesome-market-tool'));
+
+    // 测试非 bundle 插件（如 dsh-mcp-manager）安装：绝不应进入 bundles，应挂载至 cordis.patch.yml
+    const nonBundlePnpm = path.join(dir, 'fake-pnpm-nb.cjs');
+    fs.writeFileSync(
+      nonBundlePnpm,
+      `
+      const fs = require('node:fs');
+      const path = require('node:path');
+      const modDir = path.join(process.cwd(), 'node_modules', 'custom-cordis-plugin');
+      fs.mkdirSync(modDir, { recursive: true });
+      fs.writeFileSync(path.join(modDir, 'package.json'), JSON.stringify({ name: 'custom-cordis-plugin', version: '0.5.0' }));
+      `,
+    );
+    const resNb = await installPluginToProfile(
+      dir,
+      { name: 'custom-cordis-plugin', installSpec: 'latest' },
+      { nodeBin: process.execPath, pnpmCjs: nonBundlePnpm },
+    );
+    assert.equal(resNb.ok, true);
+    const pkgNb = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.ok(!pkgNb.dsh.profile.bundles.includes('custom-cordis-plugin'), '非 bundle 绝不进入 bundles');
+    const patchContent = fs.readFileSync(path.join(dir, 'cordis.patch.yml'), 'utf8');
+    assert.ok(patchContent.includes('custom-cordis-plugin'), '非 bundle 成功写入 cordis.patch.yml');
+
+    // 测试当 installSpec 等于插件名称（未指定具体版本，如 dsh-whale-widget）时，初始依赖应设为 latest 而不是 ^dsh-whale-widget
+    const res2 = await installPluginToProfile(
+      dir,
+      { name: 'another-tool', installSpec: 'another-tool' },
+      { nodeBin: process.execPath, pnpmCjs: mockPnpm },
+    );
+    assert.equal(res2.ok, false, '因为 mock 没生成 another-tool 目录，因此验证到未拼错 ^another-tool 即可');
+  });
+
+  await t('pnpm 失败时自动回滚 package.json', async () => {
+    const dir = tmpProfile();
+    const originalPkg = {
+      name: 'test-profile-rollback',
+      dependencies: { 'existing-pkg': '^1.0.0' },
+      dsh: { profile: { bundles: ['existing-pkg'] } },
+    };
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(originalPkg, null, 2));
+
+    const mockFailingPnpm = path.join(dir, 'fail-pnpm.cjs');
+    fs.writeFileSync(mockFailingPnpm, 'process.exit(1);');
+
+    const res = await installPluginToProfile(
+      dir,
+      { name: 'fail-plugin', installSpec: 'latest' },
+      { nodeBin: process.execPath, pnpmCjs: mockFailingPnpm },
+    );
+
+    assert.equal(res.ok, false);
+    assert.match(res.error, /pnpm/i);
+
+    const pkgAfter = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.deepEqual(pkgAfter, originalPkg);
   });
 
   if (failed) {

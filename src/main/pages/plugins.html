@@ -2,20 +2,97 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
+<title>第三方插件管理与社区市场</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --primary: #4d6bfe;
+    --primary-hover: #3d5be8;
+    --primary-light: rgba(77, 107, 254, 0.12);
+    --border-color: rgba(128, 128, 128, 0.2);
+    --bg-card: #ffffff;
+    --text-primary: #1d2129;
+    --text-sub: #666e7a;
+    --star-gold: #f59e0b;
+    --star-bg: rgba(245, 158, 11, 0.12);
+  }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 16px 18px 76px;
-    font: 13px/1.6 -apple-system, "PingFang SC", sans-serif;
-    background: #f5f6f8; color: #1d2129;
+    margin: 0; padding: 14px 18px 76px;
+    font: 13px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", Roboto, sans-serif;
+    background: #f5f6f8; color: var(--text-primary);
     user-select: none;
   }
-  @media (prefers-color-scheme: dark) { body { background: #17181a; color: #d6d9dd; } .card{background:#1f2124!important} }
+  @media (prefers-color-scheme: dark) {
+    body {
+      background: #151719; color: #d6d9dd;
+      --bg-card: #1f2226;
+      --text-sub: #8a929e;
+      --border-color: rgba(255, 255, 255, 0.12);
+    }
+  }
+
+  /* 顶部全局分段选项卡 */
+  .header-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .nav-tabs {
+    display: inline-flex;
+    background: rgba(128, 128, 128, 0.12);
+    border-radius: 9px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .nav-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 7px;
+    border: none;
+    background: transparent;
+    font-size: 13px;
+    font-weight: 500;
+    color: inherit;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .nav-tab:hover {
+    background: rgba(128, 128, 128, 0.08);
+  }
+  .nav-tab.active {
+    background: var(--bg-card);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+    color: var(--primary);
+  }
+  .tab-badge {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(128, 128, 128, 0.18);
+    color: inherit;
+    font-weight: normal;
+  }
+  .tab-badge.hot {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    font-weight: 600;
+  }
+
+  /* 视图容器 */
+  .view-pane { display: none; }
+  .view-pane.active { display: block; }
+
+  /* 原有已安装视图卡片与排版 */
   h1 { font-size: 15px; margin: 0 0 4px; }
-  .sub { font-size: 12px; opacity: .65; margin-bottom: 14px; }
+  .sub { font-size: 12px; color: var(--text-sub); margin-bottom: 14px; }
   .card {
-    background: #fff; border-radius: 10px; padding: 10px 14px; margin-bottom: 14px;
+    background: var(--bg-card); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px;
     box-shadow: 0 1px 3px rgba(0,0,0,.08);
     overflow-x: auto;
   }
@@ -25,13 +102,13 @@
   }
   .meta { font-size: 11px; opacity:.55; font-weight: normal; }
   .profile-actions { margin-left: auto; display:flex; gap:6px; }
-  .profile-actions .mini {
+  .mini {
     font: 11px -apple-system, sans-serif; padding: 3px 9px; border-radius: 5px;
-    border: 1px solid rgba(128,128,128,.3); background: transparent; color: inherit; cursor: pointer;
+    border: 1px solid var(--border-color); background: transparent; color: inherit; cursor: pointer;
   }
-  .profile-actions .mini:disabled { opacity:.4; cursor: not-allowed; }
+  .mini:disabled { opacity:.4; cursor: not-allowed; }
   table { width: 100%; border-collapse: collapse; margin-top: 6px; }
-  td { padding: 5px 6px; border-top: 1px solid rgba(128,128,128,.15); vertical-align: middle; }
+  td { padding: 5px 6px; border-top: 1px solid var(--border-color); vertical-align: middle; }
   td.chk { width: 28px; text-align: center; }
   td.name {
     font-family: ui-monospace, Menlo, monospace;
@@ -61,72 +138,113 @@
   @media (prefers-color-scheme: dark){ .tag.current{color:#51cd6d} }
   .tag.unknown { background: rgba(128,128,128,.18); color: inherit; opacity:.7; }
   .pkg-name-link {
-    color: inherit;
-    text-decoration: none;
-    cursor: pointer;
+    color: inherit; text-decoration: none; cursor: pointer;
     border-bottom: 1px dashed rgba(128,128,128,.4);
-    transition: color .15s, border-bottom-color .15s;
   }
-  .pkg-name-link:hover {
-    color: #3b62f6;
-    border-bottom-color: #3b62f6;
-  }
-  @media (prefers-color-scheme: dark) {
-    .pkg-name-link:hover {
-      color: #7e97ff;
-      border-bottom-color: #7e97ff;
-    }
-  }
-  .pkg-links {
-    display: inline-flex;
-    gap: 4px;
-    margin-left: 6px;
-    vertical-align: middle;
-  }
+  .pkg-name-link:hover { color: var(--primary); border-bottom-color: var(--primary); }
+  .pkg-links { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
   .pkg-link-btn {
+    display: inline-flex; align-items: center; font-size: 10px; line-height: 1; padding: 2px 5px;
+    border-radius: 4px; text-decoration: none; cursor: pointer;
+    border: 1px solid var(--border-color); background: rgba(128,128,128,.08); color: inherit; opacity: .8;
+  }
+  .pkg-link-btn:hover { opacity: 1; background: var(--primary-light); color: var(--primary); border-color: var(--primary); }
+  .installed-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    max-width: 480px;
+  }
+  .pkg-title-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    cursor: pointer;
+    user-select: none;
+  }
+  .desc-toggle-icon {
     display: inline-flex;
     align-items: center;
-    font-family: -apple-system, "PingFang SC", sans-serif;
-    font-size: 10px;
-    line-height: 1;
-    padding: 2px 5px;
-    border-radius: 4px;
-    text-decoration: none;
-    cursor: pointer;
-    border: 1px solid rgba(128,128,128,.25);
-    background: rgba(128,128,128,.08);
-    color: inherit;
-    opacity: .8;
-    transition: opacity .15s, background .15s, color .15s, border-color .15s;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    font-size: 8px;
+    color: var(--text-sub);
+    border-radius: 3px;
+    transition: transform 0.15s ease, color 0.15s ease;
+    user-select: none;
+    opacity: 0.55;
+    flex-shrink: 0;
   }
-  .pkg-link-btn:hover {
+  .pkg-title-line:hover .desc-toggle-icon {
     opacity: 1;
-    background: rgba(77,107,254,.15);
-    border-color: rgba(77,107,254,.4);
-    color: #3b62f6;
+    color: var(--primary);
+  }
+  .desc-toggle-icon.expanded {
+    transform: rotate(90deg);
+    color: var(--primary);
+    opacity: 1;
+  }
+  .pkg-raw-name {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    color: var(--text-sub);
+    background: rgba(128, 128, 128, 0.1);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+  .pkg-desc-sub {
+    display: none;
+    font-size: 11px;
+    color: var(--text-sub);
+    margin-top: 5px;
+    margin-bottom: 3px;
+    line-height: 1.45;
+    max-width: 580px;
+    white-space: normal;
+    padding: 6px 10px;
+    background: rgba(128, 128, 128, 0.06);
+    border-left: 2px solid var(--primary);
+    border-radius: 4px;
+    animation: descFadeIn 0.15s ease;
+  }
+  .pkg-desc-sub.open {
+    display: block;
+  }
+  @keyframes descFadeIn {
+    from { opacity: 0; transform: translateY(-3px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .tag.unbundled {
+    background: rgba(128, 128, 128, 0.12);
+    border: 1px dashed rgba(128, 128, 128, 0.4);
+    color: var(--text-sub);
+    opacity: 0.85;
+  }
+  .meta-profile-installed {
+    font-size: 11px;
+    color: #2f9e44;
+    margin-left: 4px;
   }
   @media (prefers-color-scheme: dark) {
-    .pkg-link-btn:hover {
-      background: rgba(126,151,255,.18);
-      border-color: rgba(126,151,255,.45);
-      color: #7e97ff;
-    }
+    .meta-profile-installed { color: #51cd6d; }
   }
-  input[type=checkbox]{ width:15px; height:15px; accent-color:#4d6bfe; cursor:pointer; }
+  input[type=checkbox]{ width:15px; height:15px; accent-color: var(--primary); cursor:pointer; }
   input[type=checkbox]:disabled{ cursor:not-allowed; opacity:.35; }
   tr.info td { opacity:.55; }
-  .empty { padding: 26px 0 18px; text-align:center; opacity:.55; }
   footer {
     position: fixed; left:0; right:0; bottom:0; padding: 12px 18px;
-    background: rgba(127,127,127,.08); backdrop-filter: blur(8px);
-    display:flex; align-items:center; gap:12px;
+    background: rgba(127,127,127,.08); backdrop-filter: blur(12px);
+    display:flex; align-items:center; gap:12px; z-index: 100;
   }
   #summary { flex:1; font-size:12px; }
   button {
     font: 13px -apple-system, sans-serif; padding: 7px 16px; border-radius: 7px;
-    border: 1px solid rgba(128,128,128,.35); background: transparent; color: inherit; cursor:pointer;
+    border: 1px solid var(--border-color); background: transparent; color: inherit; cursor:pointer;
   }
-  button.primary { background:#4d6bfe; border-color:#4d6bfe; color:#fff; }
+  button.primary { background: var(--primary); border-color: var(--primary); color:#fff; }
   button.primary:disabled { opacity:.45; cursor:not-allowed; }
   button.danger { background:#e5484d; border-color:#e5484d; color:#fff; }
   .btn-update {
@@ -134,30 +252,16 @@
     border: 1px solid rgba(229,72,77,.5); background: rgba(229,72,77,.12); color:#d6313a; cursor:pointer;
   }
   .btn-update:hover { background: rgba(229,72,77,.2); }
-  .btn-update:disabled { opacity:.5; cursor: not-allowed; }
-  @media (prefers-color-scheme: dark) {
-    .btn-update { color:#ff7375; border-color: rgba(255,115,117,.5); background: rgba(255,115,117,.12); }
-    .btn-update:hover { background: rgba(255,115,117,.2); }
-  }
-  .report { margin-top: 10px; font-size: 12px; }
-  .report .ok { color: #2f9e44; } .report .err { color: #e5484d; }
-  .report .neutral { opacity: .75; }
-  .badge-update {
-    display: inline-block; min-width: 18px; height: 18px; line-height: 18px;
-    padding: 0 6px; border-radius: 9px; font-size: 11px; font-weight: 600;
-    background: #e5484d; color: #fff; text-align:center;
-  }
   .spinner {
     display:inline-block; width:11px; height:11px;
-    border: 2px solid rgba(128,128,128,.35); border-top-color: #4d6bfe;
+    border: 2px solid rgba(128,128,128,.35); border-top-color: var(--primary);
     border-radius:50%; animation: spin .7s linear infinite; vertical-align: -1px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   .banner-update {
     display:flex; align-items:center; gap:10px; flex-wrap: wrap;
     background: rgba(229,72,77,.12); border: 1px solid rgba(229,72,77,.4);
-    border-radius: 10px; padding: 10px 14px; margin-bottom: 14px;
-    font-size: 13px;
+    border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 13px;
   }
   .banner-update .strong { font-weight: 600; color:#d6313a; }
   @media (prefers-color-scheme: dark) { .banner-update .strong { color:#ff7375; } }
@@ -166,14 +270,408 @@
     font: 12px -apple-system, sans-serif; padding: 5px 14px; border-radius: 6px;
     border: 1px solid #e5484d; background:#e5484d; color:#fff; cursor:pointer;
   }
-  .banner-update button.all-update:disabled { opacity:.5; cursor:not-allowed; }
-  .banner-update .checked-at { font-size: 11px; opacity:.6; }
+
+  /* ────────────────────────── 社区插件市场专属样式 ────────────────────────── */
+  .market-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .search-box {
+    position: relative;
+    flex: 1;
+    min-width: 220px;
+  }
+  .search-input {
+    width: 100%;
+    height: 34px;
+    padding: 0 12px 0 32px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    color: inherit;
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .search-input:focus {
+    border-color: var(--primary);
+  }
+  .search-icon {
+    position: absolute;
+    left: 10px;
+    top: 9px;
+    width: 14px;
+    height: 14px;
+    opacity: 0.5;
+    pointer-events: none;
+  }
+  .profile-select-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-sub);
+  }
+  .profile-select {
+    height: 32px;
+    padding: 0 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    color: inherit;
+    font-size: 12px;
+    outline: none;
+  }
+
+  /* 分类过滤胶囊条（多行自适应包裹） */
+  .category-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 6px;
+    margin-bottom: 16px;
+  }
+  .cat-pill {
+    white-space: nowrap;
+    font-size: 12px;
+    padding: 4px 11px;
+    border-radius: 16px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    color: var(--text-sub);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .cat-pill:hover {
+    color: var(--text-primary);
+    border-color: rgba(128,128,128,0.4);
+  }
+  .cat-pill.active {
+    background: var(--primary-light);
+    color: var(--primary);
+    border-color: var(--primary);
+    font-weight: 500;
+  }
+
+  /* 市场插件卡片网格与分类分组 */
+  .category-section {
+    margin-bottom: 28px;
+  }
+  .category-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-color);
+  }
+  .category-section-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .category-section-badge {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 12px;
+    background: var(--primary-light);
+    color: var(--primary);
+  }
+  .market-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .market-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+    position: relative;
+  }
+  .market-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    border-color: rgba(77, 107, 254, 0.4);
+  }
+  .rank-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+    min-width: 22px;
+    height: 18px;
+    padding: 0 4px;
+    border-radius: 4px;
+    background: rgba(128, 128, 128, 0.12);
+    color: var(--text-sub);
+    flex-shrink: 0;
+  }
+  .rank-badge.rank-top {
+    background: rgba(235, 142, 38, 0.18);
+    color: #e67700;
+  }
+  @media (prefers-color-scheme: dark) {
+    .rank-badge.rank-top {
+      background: rgba(251, 191, 36, 0.2);
+      color: #fbbf24;
+    }
+  }
+  .card-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .plugin-title-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .plugin-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    word-break: break-all;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .plugin-meta-sub {
+    font-size: 11px;
+    color: var(--text-sub);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  .meta-repo {
+    opacity: 0.85;
+  }
+  .meta-pkg {
+    background: rgba(128, 128, 128, 0.08);
+    padding: 0 4px;
+    border-radius: 3px;
+    border: 1px solid var(--border-color);
+  }
+  .plugin-cat-tag {
+    font-size: 10px;
+    font-weight: normal;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(128, 128, 128, 0.12);
+    color: var(--text-sub);
+  }
+  .plugin-official-tag {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(77, 107, 254, 0.14);
+    color: #3b62f6;
+    border: 1px solid rgba(77, 107, 254, 0.3);
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .plugin-official-tag {
+      background: rgba(77, 107, 254, 0.22);
+      color: #7e97ff;
+      border-color: rgba(126, 151, 255, 0.4);
+    }
+  }
+  .card-stats {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .star-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--star-gold);
+    background: var(--star-bg);
+    padding: 2px 7px;
+    border-radius: 6px;
+  }
+  .star-icon { width: 12px; height: 12px; fill: currentColor; }
+  .plugin-desc {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-sub);
+    margin-bottom: 12px;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-height: 54px;
+  }
+  .card-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-top: 1px solid var(--border-color);
+    padding-top: 10px;
+    margin-top: auto;
+  }
+  .card-links {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn-repo {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: rgba(128, 128, 128, 0.06);
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .btn-repo:hover {
+    background: var(--primary-light);
+    color: var(--primary);
+    border-color: var(--primary);
+  }
+  .btn-install {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 4px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--primary);
+    background: var(--primary);
+    color: #fff;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .btn-install:hover {
+    background: var(--primary-hover);
+  }
+  .btn-install.installed {
+    background: rgba(47, 158, 68, 0.14);
+    border-color: rgba(47, 158, 68, 0.4);
+    color: #2f9e44;
+    cursor: default;
+  }
+  @media (prefers-color-scheme: dark) {
+    .btn-install.installed {
+      color: #51cd6d;
+      border-color: rgba(81, 205, 109, 0.4);
+    }
+  }
+  .btn-install:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  /* 提示 Toast */
+  .toast-container {
+    position: fixed;
+    bottom: 60px;
+    right: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 1000;
+    pointer-events: none;
+  }
+  .toast {
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    background: #1f2226;
+    color: #fff;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    animation: slideIn 0.2s ease-out;
+  }
+  .toast.success { border-left: 4px solid #2f9e44; }
+  .toast.error { border-left: 4px solid #e5484d; }
+  @keyframes slideIn { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 </style>
 </head>
 <body>
-  <h1>第三方插件管理</h1>
-  <div class="sub">扫描 ~/.dsh/profiles 下各 profile。官方包（@deepseek-ai/*）不可移除；带 <span class="tag ref">bundle</span><span class="tag ref">补丁层</span> 标记表示该插件在对应位置被引用，移除时会一并清理。带 <span class="tag update">有新版</span> 的第三方插件可点击「更新」按钮升级。</div>
-  <div id="content">加载中…</div>
+
+  <!-- 顶部 Tab 导航 -->
+  <div class="header-nav">
+    <div class="nav-tabs">
+      <button class="nav-tab active" id="tabInstalledBtn" onclick="switchView('installed')">
+        已安装插件
+        <span class="tab-badge" id="installedCountBadge">0</span>
+      </button>
+      <button class="nav-tab" id="tabMarketBtn" onclick="switchView('market')">
+        社区插件市场
+        <span class="tab-badge hot">分类 Top 10</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- 视图 1：已安装插件管理 -->
+  <div id="viewInstalled" class="view-pane active">
+    <h1>第三方插件管理</h1>
+    <div class="sub">扫描 ~/.dsh/profiles 下各 profile。官方包（@deepseek-ai/*）不可移除；带 <span class="tag ref">bundle</span><span class="tag ref">补丁层</span> 标记表示该插件被对应位置引用。带 <span class="tag update">有新版</span> 的第三方插件可点击「更新」按钮升级。</div>
+    <div class="installed-toolbar">
+      <div class="search-box">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input type="text" id="installedSearchInput" class="search-input" placeholder="实时过滤已安装插件名称、项目名或说明…" oninput="filterInstalledPlugins()" />
+      </div>
+    </div>
+    <div id="content">加载中…</div>
+  </div>
+
+  <!-- 视图 2：社区插件市场 -->
+  <div id="viewMarket" class="view-pane">
+    <h1>社区插件市场</h1>
+    <div class="sub">汇聚社区主流市场高星与高安装量插件，每个分类严选推荐 Top 10 精品插件，去重归类，支持开源地址跳转与一键安装至指定 Profile。</div>
+
+    <div class="market-toolbar">
+      <div class="search-box">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input type="text" id="marketSearchInput" class="search-input" placeholder="实时搜索插件名称、中文功能描述、作者或关键词…" oninput="filterMarketPlugins()" />
+      </div>
+      <div class="profile-select-group">
+        <span>安装目标 Profile:</span>
+        <select id="marketTargetProfile" class="profile-select"></select>
+      </div>
+      <button id="marketRefreshBtn" class="mini" onclick="refreshMarketData()">刷新市场</button>
+    </div>
+
+    <!-- 分类过滤栏 -->
+    <div class="category-bar" id="categoryBar"></div>
+
+    <!-- 插件展示容器 -->
+    <div id="marketGrid">加载中…</div>
+  </div>
+
+  <!-- 底部操作栏 -->
   <footer>
     <span id="summary"></span>
     <button id="cancelBtn" style="display:none">取消</button>
@@ -183,19 +681,82 @@
     <button id="refreshBtn">刷新</button>
   </footer>
 
+  <!-- Toast 提示容器 -->
+  <div class="toast-container" id="toastContainer"></div>
+
 <script>
+let CURRENT_TAB = 'installed';
 let DATA = [];
+let RESTARTING = false; // DSH 服务重启中：期间禁用所有 Bundle 启用/停用按钮，避免并发触发重启
 const selected = new Map(); // profile -> Set(names)
-// 更新状态缓存：profile -> Map<name, {latest, status, loading, error, from, to}>
-const updateState = new Map();
+const updateState = new Map(); // profile -> Map<name, {latest, status, loading, error, from, to}>
+
+// 插件市场状态
+let MARKET_PLUGINS = [];
+let MARKET_CATEGORIES = [];
+let ACTIVE_CATEGORY = 'all';
+let SEARCH_KEYWORD = '';
+const installingSet = new Set(); // 记录正在安装中的插件名字
 
 const $ = (s) => document.querySelector(s);
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function showToast(msg, type = 'success') {
+  const c = document.getElementById('toastContainer');
+  if (!c) return;
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => {
+    t.style.opacity = '0';
+    t.style.transition = 'opacity 0.3s ease';
+    setTimeout(() => t.remove(), 300);
+  }, 3500);
+}
+
+// 视图切换
+function switchView(tab) {
+  CURRENT_TAB = tab;
+  document.querySelectorAll('.nav-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab || b.id.includes(tab === 'market' ? 'Market' : 'Installed')));
+  document.querySelectorAll('.view-pane').forEach((p) => p.classList.toggle('active', p.id === (tab === 'market' ? 'viewMarket' : 'viewInstalled')));
+
+  const isMarket = tab === 'market';
+  $('#removeBtn').style.display = isMarket ? 'none' : '';
+  $('#checkAllBtn').style.display = isMarket ? 'none' : '';
+  $('#refreshBtn').style.display = isMarket ? 'none' : '';
+  $('#cancelBtn').style.display = 'none';
+  $('#confirmBtn').style.display = 'none';
+
+  if (isMarket) {
+    if (MARKET_PLUGINS.length === 0) {
+      loadMarketData();
+    } else {
+      filterMarketPlugins();
+    }
+  } else {
+    updateSummary();
+  }
+}
+
+// ────────────────────────── 已安装插件视图逻辑 ──────────────────────────
+let INSTALLED_SEARCH_KEYWORD = '';
+function filterInstalledPlugins() {
+  INSTALLED_SEARCH_KEYWORD = ($('#installedSearchInput')?.value || '').trim().toLowerCase();
+  render();
+}
 
 function refsTags(item) {
   const t = [];
-  if (item.inBundle) t.push('<span class="tag ref">bundle</span>');
-  if (item.inPatch) t.push('<span class="tag ref">补丁层</span>');
+  if (item.inBundle) {
+    t.push('<span class="tag ref">bundle</span>');
+  }
+  if (item.inPatch) {
+    t.push('<span class="tag ref">补丁层</span>');
+  }
+  if (!item.official && !item.inBundle && !item.inPatch) {
+    t.push('<span class="tag unbundled" title="依赖已安装，但未启用">未启用</span>');
+  }
   return t.join('') || '<span style="opacity:.4">—</span>';
 }
 
@@ -235,7 +796,7 @@ function renderRow(profile, item) {
   const removable = !item.official;
   const key = item.rawName || item.name;
   if (!removable && item.insertOnly) {
-    return `<tr class="info"><td class="chk"></td><td class="name" title="${esc(item.name)}">${esc(item.name)}</td>
+    return `<tr class="info"><td class="chk"></td><td class="name" title="${esc(item.name)}"><div class="pkg-title-line"><span class="pkg-display-name">${esc(item.name)}</span></div></td>
       <td class="range" title="${esc(item.range)}">${esc(item.range)}</td>
       <td class="refs"><span class="tag official">官方配置</span>${refsTags(item)}</td>
       <td class="upd"></td></tr>`;
@@ -243,31 +804,67 @@ function renderRow(profile, item) {
   const checked = selected.get(profile)?.has(key) ? 'checked' : '';
   const updCell = removable ? `${statusTagFor(item, profile)} ${updateBtnFor(item, profile)}` : '';
 
-  let nameHtml = esc(item.name);
-  let linkBadges = '';
+  const badges = [];
   if (removable) {
-    const bestUrl = item.githubUrl || item.npmUrl;
-    if (bestUrl) {
-      const tip = item.githubUrl ? `点击在浏览器打开 GitHub 仓库：${item.githubUrl}` : `点击在浏览器打开 npm 页面：${item.npmUrl}`;
-      nameHtml = `<a class="pkg-name-link" data-url="${esc(bestUrl)}" title="${esc(tip)}">${esc(item.name)}</a>`;
-    }
-    const badges = [];
     if (item.githubUrl) {
       badges.push(`<a class="pkg-link-btn" data-url="${esc(item.githubUrl)}" title="前往 GitHub 开源仓库: ${esc(item.githubUrl)}">GitHub ↗</a>`);
     }
     if (item.npmUrl) {
       badges.push(`<a class="pkg-link-btn" data-url="${esc(item.npmUrl)}" title="前往 npm 页面: ${esc(item.npmUrl)}">npm ↗</a>`);
     }
-    if (badges.length > 0) {
-      linkBadges = `<span class="pkg-links">${badges.join('')}</span>`;
+  }
+  const linkBadges = badges.length > 0 ? `<span class="pkg-links">${badges.join('')}</span>` : '';
+
+  let nameHtml = '';
+  const hasDesc = Boolean(item.description);
+  const toggleIcon = hasDesc ? `<span class="desc-toggle-icon" data-act="toggle-desc" title="点击展开/收起描述">▶</span>` : '';
+
+  if (item.displayName && item.displayName !== item.name) {
+    const bestUrl = item.githubUrl || item.npmUrl;
+    const titleLink = bestUrl
+      ? `<a class="pkg-name-link" data-url="${esc(bestUrl)}" title="点击前往开源主页">${esc(item.displayName)}</a>`
+      : `<span class="pkg-display-name">${esc(item.displayName)}</span>`;
+    nameHtml = `
+      <div class="pkg-title-line" ${hasDesc ? 'data-act="toggle-desc" title="点击插件展开/收起说明"' : ''}>
+        ${toggleIcon}
+        ${titleLink}
+        <span class="pkg-raw-name" title="实际 npm 依赖包名">${esc(item.name)}</span>
+        ${linkBadges}
+      </div>
+      ${hasDesc ? `<div class="pkg-desc-sub">${esc(item.description)}</div>` : ''}
+    `;
+  } else {
+    const bestUrl = removable ? (item.githubUrl || item.npmUrl) : null;
+    const titleLink = bestUrl
+      ? `<a class="pkg-name-link" data-url="${esc(bestUrl)}" title="点击前往开源主页">${esc(item.name)}</a>`
+      : `<span class="pkg-display-name">${esc(item.name)}</span>`;
+    nameHtml = `
+      <div class="pkg-title-line" ${hasDesc ? 'data-act="toggle-desc" title="点击插件展开/收起说明"' : ''}>
+        ${toggleIcon}
+        ${titleLink}
+        ${linkBadges}
+      </div>
+      ${hasDesc ? `<div class="pkg-desc-sub">${esc(item.description)}</div>` : ''}
+    `;
+  }
+
+  // 启用/停用按钮（针对第三方插件）
+  let bundleActionBtn = '';
+  if (removable) {
+    const isEnabled = Boolean(item.inBundle || item.inPatch);
+    const disabledAttr = RESTARTING ? 'disabled' : '';
+    if (isEnabled) {
+      bundleActionBtn = `<button class="mini" data-act="toggle-bundle" data-profile="${esc(profile)}" data-name="${esc(key)}" data-enable="false" style="opacity:0.75;margin-left:4px" title="停用该插件（保留依赖文件）" ${disabledAttr}>停用</button>`;
+    } else {
+      bundleActionBtn = `<button class="mini" data-act="toggle-bundle" data-profile="${esc(profile)}" data-name="${esc(key)}" data-enable="true" style="color:var(--primary);border-color:var(--primary);margin-left:4px" title="启用该插件以随界面加载运行" ${disabledAttr}>启用</button>`;
     }
   }
 
   return `<tr>
     <td class="chk">${removable ? `<input type="checkbox" data-profile="${esc(profile)}" data-key="${esc(key)}" ${checked} onchange="onToggle(this)">` : ''}</td>
-    <td class="name" title="${esc(item.name)}">${nameHtml}${linkBadges}</td>
+    <td class="name">${nameHtml}</td>
     <td class="range" title="${esc(item.range)}">${esc(item.range)}</td>
-    <td class="refs">${item.official ? '<span class="tag official">官方</span>' : '<span class="tag third">第三方</span>'}${refsTags(item)}</td>
+    <td class="refs">${item.official ? '<span class="tag official">官方</span>' : '<span class="tag third">第三方</span>'}${refsTags(item)}${bundleActionBtn}</td>
     <td class="upd">${updCell}</td>
   </tr>`;
 }
@@ -275,8 +872,19 @@ function renderRow(profile, item) {
 function renderSection(p) {
   const sel = selected.get(p.profile);
   const size = sel ? sel.size : 0;
-  const rows = p.items.map((i) => renderRow(p.profile, i)).join('');
-  const empty = p.items.length === 0 ? '<tr class="info"><td colspan="5" style="text-align:center;padding:16px 0">空 — 仅含默认结构</td></tr>' : '';
+  let items = p.items;
+  if (INSTALLED_SEARCH_KEYWORD) {
+    const kw = INSTALLED_SEARCH_KEYWORD;
+    items = items.filter((i) => {
+      const name = (i.name || '').toLowerCase();
+      const rawName = (i.rawName || '').toLowerCase();
+      const disp = (i.displayName || '').toLowerCase();
+      const desc = (i.description || '').toLowerCase();
+      return name.includes(kw) || rawName.includes(kw) || disp.includes(kw) || desc.includes(kw);
+    });
+  }
+  const rows = items.map((i) => renderRow(p.profile, i)).join('');
+  const empty = items.length === 0 ? `<tr class="info"><td colspan="5" style="text-align:center;padding:16px 0">${INSTALLED_SEARCH_KEYWORD ? '未找到匹配的已安装插件' : '空 — 仅含默认结构'}</td></tr>` : '';
   const outdatedCount = profileOutdatedCount(p.profile);
   const updAllBtn = outdatedCount > 0
     ? `<button class="mini" data-act="upd-all" data-profile="${esc(p.profile)}" title="将全部 ${outdatedCount} 个第三方插件更新到最新版">更新全部（${outdatedCount}）</button>`
@@ -299,201 +907,523 @@ function profileOutdatedCount(profile) {
   return n;
 }
 
-function totalUpdateCount() {
-  let n = 0;
-  for (const m of updateState.values()) for (const s of m.values()) if (s.status === 'outdated') n++;
-  return n;
-}
-
-function render() {
-  if (!DATA.length) { $('#content').innerHTML = '<div class="empty">未找到任何 profile</div>'; updateBar(); return; }
-  const hasThird = DATA.some((p) => p.items.some((i) => !i.official));
-  $('#content').innerHTML = updateBanner() + DATA.map(renderSection).join('') +
-    (hasThird ? '' : '<div class="empty">🎉 未发现第三方插件，全部为官方组件</div>');
-  updateBar();
-}
-
-/** 顶部「有新版」提醒横幅：列出各 profile 的可更新数 + 一键全部更新 */
-function updateBanner() {
-  const per = new Map(); // profile -> count
+function renderBanner() {
+  const outdatedProfiles = [];
+  let totalOutdated = 0;
   for (const [p, m] of updateState) {
     let n = 0;
     for (const s of m.values()) if (s.status === 'outdated') n++;
-    if (n) per.set(p, n);
+    if (n > 0) {
+      outdatedProfiles.push(`${p}（${n}）`);
+      totalOutdated += n;
+    }
   }
-  if (per.size === 0) return '';
-  const profText = [...per.entries()]
-    .map(([p, n]) => `${esc(p)} <b>${n}</b>`)
-    .join('、');
+  if (totalOutdated === 0) return '';
   return `<div class="banner-update">
-    <span class="strong">🔔 发现 ${totalUpdateCount()} 个插件可更新</span>
-    <span class="profiles">${profText}</span>
-    <button class="all-update" data-act="upd-all-global">全部更新</button>
+    <span class="strong">发现 ${totalOutdated} 个插件有新版本</span>
+    <span class="profiles">分布于：${esc(outdatedProfiles.join('、'))}</span>
+    <button class="all-update" onclick="updateAllGlobal()">一键全部更新</button>
   </div>`;
 }
 
-function updateBar() {
-  let n = 0;
-  for (const s of selected.values()) n += s.size;
-  $('#removeBtn').disabled = n === 0 || $('#confirmBtn').style.display !== 'none';
-  const upd = totalUpdateCount();
-  const sumParts = [];
-  if (n) sumParts.push(`已选 ${n} 个插件`);
-  if (upd) sumParts.push(`<span class="badge-update" title="共 ${upd} 个第三方插件可更新">${upd}</span> 个可更新`);
-  $('#summary').innerHTML = sumParts.join(' · ');
-}
-
-window.onToggle = (el) => {
-  const p = el.dataset.profile, k = el.dataset.key;
-  if (!selected.has(p)) selected.set(p, new Set());
-  const set = selected.get(p);
-  el.checked ? set.add(k) : set.delete(k);
-  updateBar();
-};
-
-function enterConfirm() {
-  const names = [];
-  for (const [p, s] of selected) for (const k of s) names.push(`${p} · ${k}`);
-  $('#summary').textContent = `将移除：${names.join('、')}（原文件自动备份）`;
-  $('#removeBtn').style.display = 'none';
-  $('#confirmBtn').style.display = '';
-  $('#cancelBtn').style.display = '';
-  updateBar();
-}
-function exitConfirm() {
-  $('#removeBtn').style.display = '';
-  $('#confirmBtn').style.display = 'none';
-  $('#cancelBtn').style.display = 'none';
-  $('#summary').textContent = '';
-  render();
-}
-
-$('#removeBtn').onclick = enterConfirm;
-$('#cancelBtn').onclick = exitConfirm;
-$('#refreshBtn').onclick = async () => {
-  const res = await window.pluginAPI.list();
-  DATA = res.profiles ?? [];
-  render();
-  await checkUpdates(null); // 「刷新」应实际重新检查，而非只是重放上次缓存的检查结果
-};
-
-$('#confirmBtn').onclick = async () => {
-  $('#confirmBtn').disabled = true;
-  const selections = {};
-  for (const [p, s] of selected) if (s.size) selections[p] = [...s];
-  try {
-    const res = await window.pluginAPI.remove(selections);
-    showReport(res.report ?? []);
-    selected.clear();
-    DATA = res.profiles ?? [];
-    // 移除后清空相关 profile 的更新状态
-    for (const p of Object.keys(selections)) updateState.delete(p);
-  } catch (err) {
-    $('#summary').textContent = `失败：${err.message}`;
+function render() {
+  if (DATA.length === 0) {
+    $('#content').innerHTML = '<div class="empty">未找到任何 profile（~/.dsh/profiles 为空）</div>';
+  } else {
+    $('#content').innerHTML = renderBanner() + DATA.map(renderSection).join('');
   }
-  $('#confirmBtn').disabled = false;
-  exitConfirm();
-};
+  updateInstalledCountBadge();
+  updateSummary();
+}
 
-$('#checkAllBtn').onclick = async () => {
-  await checkUpdates(null);
-};
+function updateInstalledCountBadge() {
+  let total = 0;
+  for (const p of DATA) {
+    total += p.items.filter((i) => !i.official).length;
+  }
+  const badge = $('#installedCountBadge');
+  if (badge) badge.textContent = String(total);
+}
 
-// 事件代理：外链跳转 + 行内「更新」按钮 + 卡片标题「检查此 profile」+「更新全部」
-document.addEventListener('click', async (ev) => {
-  const link = ev.target.closest('[data-url]');
+function updateSummary() {
+  if (CURRENT_TAB === 'market') {
+    $('#summary').textContent = `共 ${MARKET_PLUGINS.length} 款社区高星插件 · 实时同步自 dsh-1024store 与 dsh-market`;
+    return;
+  }
+  let totalSel = 0;
+  for (const set of selected.values()) totalSel += set.size;
+  $('#summary').textContent = totalSel ? `已选择 ${totalSel} 项` : `共 ${DATA.length} 个 profile`;
+  $('#removeBtn').disabled = totalSel === 0;
+}
+
+function onToggle(el) {
+  const profile = el.dataset.profile;
+  const key = el.dataset.key;
+  let set = selected.get(profile);
+  if (!set) {
+    set = new Set();
+    selected.set(profile, set);
+  }
+  if (el.checked) set.add(key);
+  else set.delete(key);
+  updateSummary();
+}
+
+function getOrCreateMap(profile) {
+  let m = updateState.get(profile);
+  if (!m) {
+    m = new Map();
+    updateState.set(profile, m);
+  }
+  return m;
+}
+
+// ────────────────────────── 社区插件市场逻辑 ──────────────────────────
+
+async function loadMarketData(force = false) {
+  $('#marketGrid').innerHTML = '<div style="grid-column: 1/-1; text-align:center; padding: 36px 0; color:var(--text-sub);">正在从社区市场获取 Top 100 插件…</div>';
+  try {
+    const fn = force ? window.pluginAPI.marketRefresh : window.pluginAPI.marketList;
+    const res = await fn();
+    MARKET_PLUGINS = res.plugins || [];
+    MARKET_CATEGORIES = res.categories || [];
+
+    // 初始化目标 profile 下拉
+    const profiles = res.availableProfiles || DATA.map((p) => p.profile);
+    const select = $('#marketTargetProfile');
+    if (select) {
+      select.innerHTML = profiles.map((p) => `<option value="${esc(p)}" ${p === 'web' ? 'selected' : ''}>${esc(p)}</option>`).join('');
+      select.onchange = () => filterMarketPlugins();
+    }
+
+    renderCategoryBar();
+    filterMarketPlugins();
+  } catch (err) {
+    $('#marketGrid').innerHTML = `<div style="grid-column: 1/-1; text-align:center; padding: 30px; color:#e5484d;">加载市场数据失败：${esc(err.message || err)}</div>`;
+  }
+}
+
+function refreshMarketData() {
+  const btn = $('#marketRefreshBtn');
+  if (btn) btn.disabled = true;
+  loadMarketData(true).finally(() => {
+    if (btn) btn.disabled = false;
+  });
+}
+
+function renderCategoryBar() {
+  const bar = $('#categoryBar');
+  if (!bar) return;
+  bar.innerHTML = MARKET_CATEGORIES.map((cat) => {
+    const active = cat.id === ACTIVE_CATEGORY ? 'active' : '';
+    const icon = cat.icon ? `${cat.icon} ` : '';
+    return `<button class="cat-pill ${active}" onclick="selectCategory('${esc(cat.id)}')">${icon}${esc(cat.name)}</button>`;
+  }).join('');
+}
+
+function selectCategory(catId) {
+  ACTIVE_CATEGORY = catId;
+  renderCategoryBar();
+  filterMarketPlugins();
+}
+
+function filterMarketPlugins() {
+  const kw = ($('#marketSearchInput')?.value || '').trim().toLowerCase();
+  SEARCH_KEYWORD = kw;
+
+  let filtered = MARKET_PLUGINS;
+  if (ACTIVE_CATEGORY !== 'all') {
+    filtered = filtered.filter((p) => p.category === ACTIVE_CATEGORY);
+  }
+  if (kw) {
+    filtered = filtered.filter((p) => {
+      const displayName = (p.displayName || '').toLowerCase();
+      const name = (p.name || '').toLowerCase();
+      const pkg = (p.packageName || '').toLowerCase();
+      const repo = (p.repository || p.repoFullName || '').toLowerCase();
+      const desc = (p.description || '').toLowerCase();
+      const owner = (p.owner || '').toLowerCase();
+      return (
+        displayName.includes(kw) ||
+        name.includes(kw) ||
+        pkg.includes(kw) ||
+        repo.includes(kw) ||
+        desc.includes(kw) ||
+        owner.includes(kw)
+      );
+    });
+  }
+
+  renderMarketCards(filtered);
+}
+
+function formatStars(n) {
+  if (!n || typeof n !== 'number') return '0';
+  if (n >= 10000) return (n / 10000).toFixed(1) + 'w';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
+}
+
+function renderSingleCard(p) {
+  const installKey = p.id || p.name;
+  const isInstalling = installingSet.has(installKey);
+  const targetProfile = $('#marketTargetProfile')?.value || 'web';
+  const isInstalledInCurrent = Array.isArray(p.installedProfiles) && p.installedProfiles.includes(targetProfile);
+  const isInstalledAnywhere = Array.isArray(p.installedProfiles) && p.installedProfiles.length > 0;
+
+  let installBtnText = '一键安装';
+  let installBtnClass = 'btn-install';
+  let installDisabled = '';
+
+  if (isInstalling) {
+    installBtnText = '<span class="spinner"></span> 安装中…';
+    installDisabled = 'disabled';
+  } else if (isInstalledInCurrent) {
+    installBtnText = '✓ 已安装';
+    installBtnClass += ' installed';
+  }
+
+  const repoBtn = p.githubUrl
+    ? `<button class="btn-repo" onclick="openRepo('${esc(p.githubUrl)}')">开源地址 ↗</button>`
+    : '';
+
+  const titleText = p.displayName || p.name;
+  const subRepoText = p.repoFullName || (p.owner && p.repository ? `${p.owner}/${p.repository}` : '');
+  const pkgTag = p.packageName && p.packageName !== titleText
+    ? `<span class="meta-pkg" title="安装包名">${esc(p.packageName)}</span>`
+    : '';
+
+  const profileBadge = !isInstalledInCurrent && isInstalledAnywhere
+    ? `<span class="meta-profile-installed" title="已安装在其他 profile: ${esc(p.installedProfiles.join(', '))}">已在 ${esc(p.installedProfiles.join('、'))} 安装</span>`
+    : '';
+
+  const rankBadge = p.categoryRank
+    ? `<span class="rank-badge ${p.categoryRank <= 3 ? 'rank-top' : ''}" title="分类排名第 ${p.categoryRank}">#${p.categoryRank}</span>`
+    : '';
+
+  const officialTag = p.official
+    ? `<span class="plugin-official-tag" title="官方出品/官方推荐插件">🌟 官方推荐</span>`
+    : '';
+
+  return `
+    <div class="market-card">
+      <div>
+        <div class="card-top">
+          <div class="plugin-title-group">
+            <div class="plugin-title" title="${esc(titleText)}">
+              ${rankBadge}
+              <span>${esc(titleText)}</span>
+              ${officialTag}
+              <span class="plugin-cat-tag">${esc(p.categoryLabel || p.category)}</span>
+            </div>
+            <div class="plugin-meta-sub">
+              ${subRepoText ? `<span class="meta-repo">${esc(subRepoText)}</span>` : ''}
+              ${pkgTag}
+              ${profileBadge}
+            </div>
+          </div>
+          <div class="card-stats">
+            <span class="star-badge" title="GitHub Stars">
+              <svg class="star-icon" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+              ${formatStars(p.stars)}
+            </span>
+          </div>
+        </div>
+        <div class="plugin-desc" title="${esc(p.description)}">${esc(p.description)}</div>
+      </div>
+
+      <div class="card-foot">
+        <div class="card-links">
+          ${repoBtn}
+        </div>
+        <button class="${installBtnClass}" ${installDisabled} onclick="triggerInstall('${esc(installKey)}')">
+          ${installBtnText}
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderMarketCards(plugins) {
+  const container = $('#marketGrid');
+  if (!container) return;
+
+  if (plugins.length === 0) {
+    container.innerHTML = '<div style="text-align:center; padding: 40px 0; color:var(--text-sub);">未找到匹配的插件</div>';
+    updateSummary();
+    return;
+  }
+
+  // 1. 如果存在搜索关键词：以全局扁平搜索结果展示
+  if (SEARCH_KEYWORD) {
+    container.innerHTML = `
+      <div style="font-size: 13px; color: var(--text-sub); margin-bottom: 12px;">
+        搜索结果：共找到 <strong>${plugins.length}</strong> 款匹配插件
+      </div>
+      <div class="market-grid">
+        ${plugins.map(renderSingleCard).join('')}
+      </div>
+    `;
+    updateSummary();
+    return;
+  }
+
+  // 2. 如果选中了特定分类：只展示该分类的 Top 10
+  if (ACTIVE_CATEGORY !== 'all') {
+    const currentCat = MARKET_CATEGORIES.find((c) => c.id === ACTIVE_CATEGORY);
+    const catName = currentCat ? currentCat.name : '精选';
+    const catIcon = currentCat?.icon ? `${currentCat.icon} ` : '';
+
+    container.innerHTML = `
+      <div class="category-section">
+        <div class="category-section-header">
+          <span class="category-section-title">${catIcon}${esc(catName)}</span>
+          <span class="category-section-badge">Top 10 精选推荐 (${plugins.length})</span>
+        </div>
+        <div class="market-grid">
+          ${plugins.map(renderSingleCard).join('')}
+        </div>
+      </div>
+    `;
+    updateSummary();
+    return;
+  }
+
+  // 3. 选中“全部”且无搜索词：按分类展示每个分类的 Top 10 专区
+  const sections = [];
+  const displayCats = MARKET_CATEGORIES.filter((c) => c.id !== 'all');
+
+  for (const cat of displayCats) {
+    const catPlugins = plugins.filter((p) => p.category === cat.id);
+    if (catPlugins.length === 0) continue;
+
+    const icon = cat.icon ? `${cat.icon} ` : '';
+    sections.push(`
+      <div class="category-section">
+        <div class="category-section-header">
+          <span class="category-section-title">${icon}${esc(cat.name)}</span>
+          <span class="category-section-badge">Top 10 推荐 (${catPlugins.length})</span>
+        </div>
+        <div class="market-grid">
+          ${catPlugins.map(renderSingleCard).join('')}
+        </div>
+      </div>
+    `);
+  }
+
+  container.innerHTML = sections.join('');
+  updateSummary();
+}
+
+function openRepo(url) {
+  if (url && window.pluginAPI?.openExternal) {
+    window.pluginAPI.openExternal(url);
+  }
+}
+
+async function triggerInstall(key) {
+  const plugin = MARKET_PLUGINS.find((p) => (p.id || p.name) === key || p.name === key || p.displayName === key);
+  if (!plugin) return;
+  const displayName = plugin.displayName || plugin.name;
+  const targetProfile = $('#marketTargetProfile')?.value || 'web';
+  const isInstalledInCurrent = Array.isArray(plugin.installedProfiles) && plugin.installedProfiles.includes(targetProfile);
+  if (isInstalledInCurrent) {
+    showToast(`插件 ${displayName} 已经安装在 profile/${targetProfile} 中`, 'success');
+    return;
+  }
+
+  const installKey = plugin.id || plugin.name;
+  installingSet.add(installKey);
+  filterMarketPlugins();
+
+  showToast(`开始安装 ${displayName} 至 profile/${targetProfile}…`, 'success');
+
+  try {
+    const res = await window.pluginAPI.marketInstall(plugin, targetProfile);
+    if (res.ok) {
+      showToast(`插件 ${displayName} 安装成功并已激活！`, 'success');
+      plugin.installedProfiles = [...new Set([...(plugin.installedProfiles || []), targetProfile])];
+      plugin.isInstalled = true;
+      if (Array.isArray(res.profiles)) DATA = res.profiles;
+      render();
+    } else {
+      showToast(`安装 ${displayName} 失败：${res.error || '未知错误'}`, 'error');
+    }
+  } catch (err) {
+    showToast(`安装异常：${err.message || err}`, 'error');
+  } finally {
+    installingSet.delete(installKey);
+    filterMarketPlugins();
+  }
+}
+
+// ────────────────────────── 全局事件与启动 ──────────────────────────
+
+// 事件代理：GitHub / npm 外链与单包更新
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-url]');
   if (link && link.dataset.url) {
-    ev.preventDefault();
-    ev.stopPropagation();
+    e.preventDefault();
     window.pluginAPI.openExternal(link.dataset.url);
     return;
   }
-  const t = ev.target.closest('[data-act]');
-  if (!t) return;
-  if (t.dataset.act === 'upd-one') {
-    const p = t.dataset.profile, k = t.dataset.key, target = t.dataset.target || 'latest';
-    await updateOne(p, k, target);
-  } else if (t.dataset.act === 'check-one') {
-    await checkUpdates([t.dataset.profile]);
-  } else if (t.dataset.act === 'upd-all') {
-    await updateAll(t.dataset.profile);
-  } else if (t.dataset.act === 'upd-all-global') {
-    await updateAllGlobal();
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const act = btn.dataset.act;
+  const profile = btn.dataset.profile;
+  const key = btn.dataset.key || btn.dataset.name;
+  if (act === 'upd-one') updateOne(profile, key, btn.dataset.target);
+  if (act === 'upd-all') updateAll(profile);
+  if (act === 'check-one') checkProfile(profile);
+  if (act === 'toggle-bundle') {
+    const shouldEnable = btn.dataset.enable === 'true';
+    toggleBundle(profile, btn.dataset.name, shouldEnable);
+  }
+  if (act === 'toggle-desc') {
+    const row = btn.closest('tr');
+    const descEl = row?.querySelector('.pkg-desc-sub');
+    const iconEl = row?.querySelector('.desc-toggle-icon');
+    if (descEl) {
+      const isOpen = descEl.classList.toggle('open');
+      if (iconEl) iconEl.classList.toggle('expanded', isOpen);
+    }
   }
 });
 
-function getOrCreateMap(profile) {
-  if (!updateState.has(profile)) updateState.set(profile, new Map());
-  return updateState.get(profile);
+async function toggleBundle(profile, name, enable) {
+  if (RESTARTING) return; // 重启进行中，忽略重复点击（按钮已 disabled，双保险）
+  try {
+    const res = await window.pluginAPI.toggleBundle(profile, name, enable);
+    if (res.ok) {
+      if (Array.isArray(res.profiles)) DATA = res.profiles;
+      render();
+
+      if (res.needsRestart) {
+        // Bundle 插件：需要重启 DSH 服务才能生效
+        RESTARTING = true;
+        render(); // 禁用所有 Bundle 按钮，避免重启期间的并发切换
+        showToast(`插件 ${name} 已${enable ? '启用' : '停用'}，正在重启服务…`, 'info');
+        try {
+          await window.pluginAPI.restartService();
+          showToast(`DSH 服务已重启，${name} ${enable ? '启用' : '停用'}已生效 ✓`, 'success');
+        } catch (restartErr) {
+          showToast(`服务重启失败：${restartErr.message || restartErr}，请手动重启 APP`, 'error');
+        } finally {
+          RESTARTING = false;
+          render();
+        }
+      } else {
+        // 非 Bundle 插件（cordis.patch.yml）：DSH 内核自动热重载，约 1 秒内生效
+        showToast(`插件 ${name} 已${enable ? '启用' : '停用'}（实时生效） ✓`, 'success');
+      }
+    } else {
+      showToast(`操作失败：${res.error || '未知错误'}`, 'error');
+    }
+  } catch (err) {
+    showToast(`切换失败：${err.message || err}`, 'error');
+  }
 }
 
-let autoChecking = false; // 打开窗口时的自动检查，避免与手动检查并发
-let autoChecked = false;  // 本次会话是否已自动检查过
-
-async function checkUpdates(profiles) {
-  $('#checkAllBtn').disabled = true;
-  // 标记 loading
-  const targets = profiles ?? DATA.map((p) => p.profile);
-  for (const p of targets) {
-    const m = getOrCreateMap(p);
-    for (const item of (DATA.find((x) => x.profile === p)?.items ?? [])) {
-      if (item.official) continue;
-      const k = item.rawName || item.name;
-      const cur = m.get(k);
-      if (cur?.loading) continue;
-      m.set(k, { ...(cur || {}), loading: true, error: null });
-    }
+async function checkProfile(profile) {
+  const m = getOrCreateMap(profile);
+  const p = DATA.find((x) => x.profile === profile);
+  if (!p) return;
+  for (const i of p.items) {
+    if (!i.official) m.set(i.rawName || i.name, { ...(m.get(i.rawName || i.name) || {}), loading: true });
   }
   render();
   try {
-    const res = await window.pluginAPI.checkUpdates(profiles);
-    const updates = res.updates ?? {};
-    for (const [p, list] of Object.entries(updates)) {
-      if (Array.isArray(list)) {
-        const m = getOrCreateMap(p);
-        for (const u of list) {
-          m.set(u.name, {
-            loading: false,
-            latest: u.latest,
-            from: u.from || u.range,
-            status: u.status,
-            error: null,
-          });
-        }
-      } else if (list?.error) {
-        const m = getOrCreateMap(p);
-        for (const k of m.keys()) {
-          const cur = m.get(k);
-          m.set(k, { ...cur, loading: false, status: 'unknown', error: list.error });
-        }
+    const res = await window.pluginAPI.checkUpdates([profile]);
+    const list = res.updates?.[profile];
+    if (Array.isArray(list)) {
+      for (const u of list) {
+        m.set(u.name, {
+          loading: false,
+          latest: u.latest,
+          from: u.from || u.range,
+          status: u.status,
+          error: u.error || null,
+        });
       }
     }
   } catch (err) {
-    showReport([{ error: '检查更新失败：' + err.message }]);
+    for (const i of p.items) {
+      if (!i.official) m.set(i.rawName || i.name, { loading: false, status: 'unknown', error: err.message });
+    }
   }
-  $('#checkAllBtn').disabled = false;
   render();
 }
 
-// 打开界面即自动检查全部更新，直接显示「有新版」条目；
-// 自动检查期间把 summary 改为检查进度提示。
-async function autoCheck() {
-  if (autoChecked || autoChecking) return;
-  autoChecking = true;
-  $('#summary').innerHTML = '<span class="spinner"></span> 正在检查更新…';
+async function checkAllUpdates() {
+  $('#checkAllBtn').disabled = true;
+  for (const p of DATA) {
+    const m = getOrCreateMap(p.profile);
+    for (const i of p.items) {
+      if (!i.official) m.set(i.rawName || i.name, { ...(m.get(i.rawName || i.name) || {}), loading: true });
+    }
+  }
+  render();
   try {
-    await checkUpdates(null);
+    const res = await window.pluginAPI.checkUpdates();
+    for (const [p, list] of Object.entries(res.updates || {})) {
+      if (!Array.isArray(list)) continue;
+      const m = getOrCreateMap(p);
+      for (const u of list) {
+        m.set(u.name, {
+          loading: false,
+          latest: u.latest,
+          from: u.from || u.range,
+          status: u.status,
+          error: u.error || null,
+        });
+      }
+    }
   } finally {
-    autoChecking = false;
-    autoChecked = true;
-    updateBar();
+    $('#checkAllBtn').disabled = false;
+    render();
   }
 }
 
+$('#checkAllBtn').onclick = checkAllUpdates;
+$('#refreshBtn').onclick = () => load();
+
+$('#removeBtn').onclick = () => {
+  $('#removeBtn').style.display = 'none';
+  $('#cancelBtn').style.display = '';
+  $('#confirmBtn').style.display = '';
+};
+
+$('#cancelBtn').onclick = () => {
+  $('#removeBtn').style.display = '';
+  $('#cancelBtn').style.display = 'none';
+  $('#confirmBtn').style.display = 'none';
+};
+
+$('#confirmBtn').onclick = async () => {
+  const selections = {};
+  for (const [p, set] of selected.entries()) {
+    if (set.size) selections[p] = [...set];
+  }
+  $('#confirmBtn').disabled = true;
+  try {
+    const res = await window.pluginAPI.remove(selections);
+    DATA = res.profiles ?? [];
+    selected.clear();
+    showReport(res.report ?? []);
+  } catch (err) {
+    showReport([{ error: err.message }]);
+  } finally {
+    $('#confirmBtn').disabled = false;
+    $('#removeBtn').style.display = '';
+    $('#cancelBtn').style.display = 'none';
+    $('#confirmBtn').style.display = 'none';
+    render();
+  }
+};
+
 async function updateOne(profile, name, target) {
   const m = getOrCreateMap(profile);
-  const cur = m.get(name) || {};
-  m.set(name, { ...cur, loading: true, error: null });
+  m.set(name, { ...(m.get(name) || {}), loading: true, error: null });
   render();
   try {
     const res = await window.pluginAPI.update(profile, name, target);
@@ -511,7 +1441,6 @@ async function updateOne(profile, name, target) {
   render();
 }
 
-/** 一键把全部 profile 的可更新插件升级到最新版（逐 profile 串行） */
 async function updateAllGlobal() {
   const profiles = [];
   for (const [p, m] of updateState) {
@@ -527,14 +1456,11 @@ async function updateAllGlobal() {
   render();
 }
 
-/** 一键把某 profile 的全部「有新版」插件升级到最新版 */
 async function updateAll(profile) {
   const m = getOrCreateMap(profile);
   const items = [];
   for (const [k, s] of m) {
-    if (s.status === 'outdated') {
-      items.push({ name: k, target: s.latest || 'latest' });
-    }
+    if (s.status === 'outdated') items.push({ name: k, target: s.latest || 'latest' });
   }
   if (items.length === 0) return;
   for (const item of items) {
@@ -591,7 +1517,6 @@ function showReport(report) {
   $('#content').prepend(box);
 }
 
-/** 用主进程持久化的上次检查结果填充 updateState（立即展示，无需等网络） */
 function applyUpdateCache(cache) {
   if (!cache || typeof cache.profiles !== 'object') return;
   for (const [p, list] of Object.entries(cache.profiles)) {
@@ -611,14 +1536,35 @@ function applyUpdateCache(cache) {
   }
 }
 
+let INITIAL_TAB_HANDLED = false;
+
 async function load() {
   const res = await window.pluginAPI.list();
   DATA = res.profiles ?? [];
-  // 先用缓存立即展示更新条目，再后台自动刷新（新打开时总有提醒，不依赖网络等待）
   applyUpdateCache(res.updateCache);
   render();
-  autoCheck();
+
+  // 仅在首次进入时根据 URL query tab 参数初始化视图，后续点击刷新按钮时不再跳转 Tab
+  if (!INITIAL_TAB_HANDLED) {
+    INITIAL_TAB_HANDLED = true;
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get('tab');
+    if (tabParam === 'market') {
+      switchView('market');
+    }
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }
 }
+
+// 监听主进程切 Tab 指令
+if (window.pluginAPI?.onSwitchTab) {
+  window.pluginAPI.onSwitchTab((tab) => {
+    switchView(tab);
+  });
+}
+
 load();
 </script>
 </body>

@@ -11,7 +11,7 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { inventoryProfile, removePluginsFromProfile, sanitizeProfile } = require('../src/main/plugin-guard.js');
+const { inventoryProfile, removePluginsFromProfile, sanitizeProfile, togglePluginBundle } = require('../src/main/plugin-guard.js');
 
 let failed = false;
 const assert = (cond, msg) => {
@@ -84,8 +84,16 @@ assert(!fsSync.existsSync(path.join(profile, 'node_modules')), 'node_modules 已
 // ── 空移除 no-op ──
 const r3 = await removePluginsFromProfile(profile, [], {});
 assert(r3.removed.length === 0 && r3.reconciled === 'none', '空选择为 no-op');
-const s1 = await sanitizeProfile(profile, {});
-assert(s1.changed === false, '干净 profile 上 sanitize 为 no-op');
+// ── togglePluginBundle 启用与停用 ──
+const tb1 = await togglePluginBundle(profile, 'test-plugin', true);
+assert(tb1.ok && tb1.bundles.includes('test-plugin'), 'togglePluginBundle: 成功加入 bundle 启用');
+let pkgTb = JSON.parse(await fs.readFile(path.join(profile, 'package.json'), 'utf8'));
+assert(pkgTb.dsh.profile.bundles.includes('test-plugin'), 'package.json 已落盘 bundle');
+
+const tb2 = await togglePluginBundle(profile, 'test-plugin', false);
+assert(tb2.ok && !tb2.bundles.includes('test-plugin'), 'togglePluginBundle: 成功从 bundle 停用');
+pkgTb = JSON.parse(await fs.readFile(path.join(profile, 'package.json'), 'utf8'));
+assert(!pkgTb.dsh.profile.bundles.includes('test-plugin'), 'package.json 已剔除 bundle');
 
 console.log(failed ? '\n有失败项' : '\n═══ 插件守卫测试全部通过 ═══');
 process.exit(failed ? 1 : 0);

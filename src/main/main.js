@@ -10,7 +10,7 @@
  *   4. 拉起官方 `dsh web` 服务，健康检查通过后用主窗口加载官方页面
  */
 
-const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require('electron');
 const path = require('node:path');
 const fsSync = require('node:fs');
 const os = require('node:os');
@@ -28,11 +28,13 @@ const {
 } = require('./kernel-versions');
 const { checkShellUpdate } = require('./shell-update');
 const { createShellAutoUpdater } = require('./shell-auto-updater');
+const { createUpdateMonitor } = require('./update-monitor');
 const { createRunner } = require('./runner');
 const { createBadgeWatcher } = require('./badge');
 const { createLogger } = require('./logger');
 const { createStatusWindow } = require('./status-window');
-const { openPluginManager } = require('./plugin-manager');
+const { openPluginManager, getPluginUpdatesSummary } = require('./plugin-manager');
+const { openAboutWindow } = require('./about-window');
 const { openTokenUsageWindow } = require('./token-usage/window');
 const { openUpdateWindow: openUpdateWindowImpl } = require('./update-window');
 
@@ -57,6 +59,7 @@ let kernelSwitcher;
 let runner;
 let statusWin;
 let mainWindow = null;
+let updateMonitor = null;
 let activeVersion = null;
 let activePort = DEFAULT_PORT;
 
@@ -265,12 +268,19 @@ function createMainWindow(url) {
       contextIsolation: true,
       nodeIntegration: false,
       spellcheck: true,
+      preload: path.join(__dirname, 'main-window-preload.cjs'),
     },
   });
   mainWindow.loadURL(url);
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     statusWin?.close();
+  });
+  // 页面加载完成后同步一次更新状态
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (updateMonitor && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update:status-changed', updateMonitor.getStatus());
+    }
   });
   // 用户查看窗口即视为已读：清空任务完成角标
   mainWindow.on('focus', () => clearBadge());
@@ -319,38 +329,18 @@ function focusMainWindow() {
 
 // ─────────────────────────── 关于面板 ───────────────────────────
 
-/** 内核 = 容器承载的官方运行时 @deepseek-ai/dsh 的当前激活版本 */
-function kernelLabel() {
-  return activeVersion ? `v${activeVersion}` : '未加载';
-}
-
-function aboutLines() {
-  return [
-    `容器版本：${app.getVersion()}`,
-    `内核版本：${kernelLabel()}（@deepseek-ai/dsh）`,
-    `Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · Node ${process.versions.node}`,
-  ];
-}
-
+/**
+ * 自定义"关于"窗口：原生 About 面板（macOS setAboutPanelOptions / Windows 消息框）
+ * 都不支持在版本信息里放可点击链接，所以用独立窗口展示，并可跳转容器/内核各自的 GitHub 仓库。
+ */
 function showAbout() {
-  const [containerLine, kernelLine, runtimeLine] = aboutLines();
-  if (process.platform === 'darwin') {
-    // 原生关于面板：Version 行来自 applicationVersion；容器/内核版本写在 Credits 区
-    app.setAboutPanelOptions({
-      applicationName: 'DSH Web',
-      applicationVersion: app.getVersion(),
-      credits: [containerLine, kernelLine, runtimeLine].join('\n'),
+  try {
+    openAboutWindow({
+      activeVersion,
+      kernelDir: activeVersion ? paths.versionDir(activeVersion) : null,
     });
-    app.showAboutPanel();
-  } else {
-    dialog.showMessageBox({
-      type: 'info',
-      title: '关于 DSH Web',
-      message: `DSH Web ${app.getVersion()}`,
-      detail: [kernelLine, runtimeLine].join('\n'),
-      buttons: ['好'],
-      noLink: true,
-    });
+  } catch (err) {
+    dialog.showMessageBox({ type: 'error', message: '无法打开关于窗口', detail: String(err.message || err) });
   }
 }
 
@@ -418,6 +408,23 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
   });
   activePort = port;
   createMainWindow(url);
+
+  if (!updateMonitor) {
+    updateMonitor = createUpdateMonitor({
+      getShellInfo,
+      getKernelInfo,
+      getPluginsInfo,
+      onStatusChange(status) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('update:status-changed', status);
+        }
+      },
+      log: logLine,
+    });
+    updateMonitor.start();
+  } else {
+    updateMonitor.checkNow().catch(() => {});
+  }
   // 开发诊断：DSH_WEB_DEV_PM=1 时自动打开插件管理器
   if (process.env.DSH_WEB_DEV_PM) {
     setTimeout(() => {
@@ -509,13 +516,53 @@ function openTokenUsage() {
   }
 }
 
-/** 菜单动作：打开第三方插件管理器（浏览 / 勾选移除） */
-function openManager() {
+/**
+ * 重启 DSH 内核服务（不退出 Electron），用于插件启用/停用后立即生效。
+ * 仅重启子进程（约 3-5 秒），主窗口自动刷新，无需重启整个 APP。
+ * 并发调用（如短时间内连续切换多个 Bundle 插件）会共享同一次重启，避免 stop/start 交叉竞态。
+ */
+let restartInFlight = null;
+async function restartDshService() {
+  if (restartInFlight) return restartInFlight;
+  restartInFlight = (async () => {
+    const dshHome = resolveDshHome();
+    logLine('[runner] 插件配置变更，正在重启 DSH 服务…');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.loadURL(
+        'data:text/html;charset=utf-8,' +
+          encodeURIComponent(
+            '<body style="font:15px -apple-system,sans-serif;display:grid;place-items:center;height:100vh;margin:0;color:#666">插件配置已变更，正在重启服务…</body>',
+          ),
+      ).catch(() => {});
+    }
+    await runner.stop();
+    const { url } = await runner.start(activeVersion, settings.port, {
+      envOverride: { DSH_HOME: dshHome },
+    });
+    restartAttempts = 0;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.loadURL(url).catch(() => {});
+    }
+    logLine('[runner] DSH 服务重启完成');
+    return { ok: true };
+  })();
+  try {
+    return await restartInFlight;
+  } finally {
+    restartInFlight = null;
+  }
+}
+
+/** 菜单动作：打开第三方插件管理器（浏览 / 勾选移除 / 社区插件市场） */
+function openManager(initialTab = 'installed') {
   try {
     openPluginManager({
       dshHome: resolveDshHome(),
       pnpmCjs: pnpmCjsPath(),
       getNodeBin: async () => (await resolveNode()) ?? 'node',
+      restartService: restartDshService,
+      onUpdatesCacheChanged: () => updateMonitor?.checkNow().catch(() => {}),
+      initialTab,
       log: logLine,
     });
   } catch (err) {
@@ -530,6 +577,11 @@ const shellAutoUpdater = createShellAutoUpdater({ log: logLine });
 async function getShellInfo() {
   const latest = await checkShellUpdate(app.getVersion(), { log: logLine });
   return { currentVersion: app.getVersion(), latest, autoUpdateSupported: shellAutoUpdater.isSupported };
+}
+
+/** 升级徽标：读插件管理器已写入的更新检查缓存，不主动发起新的插件更新检查 */
+function getPluginsInfo() {
+  return getPluginUpdatesSummary(resolveDshHome());
 }
 
 /** 更新窗口：内核当前激活/固定状态 + npm registry 全部已发布版本（拉取失败返回 entries: null） */
@@ -563,6 +615,7 @@ async function switchKernelVersion(version, { pin, onLine } = {}) {
       envOverride: { DSH_HOME: dshHome },
     });
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(url).catch(() => {});
+    updateMonitor?.checkNow().catch(() => {});
     return url;
   } catch (err) {
     logLine(`[switch] 切换到 ${version} 失败：${err.message}，正在回滚…`);
@@ -607,6 +660,21 @@ function openUpdateWindow() {
   }
 }
 
+// ─────────────────────────── 主窗口更新状态 IPC ───────────────────────────
+
+ipcMain.on('update:open-window', () => {
+  openUpdateWindow();
+});
+
+// 升级徽标：仅插件有更新时（壳/内核均最新），点击直接跳转插件管理器而非"检查更新"窗口
+ipcMain.on('plugin-manager:open', () => {
+  openManager();
+});
+
+ipcMain.handle('update:get-status', async () => {
+  return updateMonitor?.getStatus() || { hasUpdate: false };
+});
+
 // ─────────────────────────── 菜单 ───────────────────────────
 
 function buildMenu() {
@@ -641,8 +709,13 @@ function buildMenu() {
           },
         },
         {
+          label: '社区插件市场…',
+          accelerator: 'CmdOrCtrl+Shift+M',
+          click: () => openManager('market'),
+        },
+        {
           label: '管理第三方插件…',
-          click: () => openManager(),
+          click: () => openManager('installed'),
         },
         {
           label: 'Token 用量统计…',
@@ -733,6 +806,7 @@ app.on('activate', async () => {
 app.on('before-quit', async (event) => {
   appQuitting = true;
   badgeWatcher?.stop();
+  updateMonitor?.stop();
   if (runner?.isRunning()) {
     event.preventDefault();
     await runner.stop().catch(() => {});
