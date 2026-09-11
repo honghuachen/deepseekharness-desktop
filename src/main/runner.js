@@ -43,14 +43,19 @@ async function pickPort(preferred) {
   throw new Error(`端口 ${preferred}~${preferred + 9} 均被占用`);
 }
 
-async function probeHealth(url) {
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(1000), redirect: 'manual' });
-    // 任何 HTTP 响应都说明服务已监听；200/30x 视为就绪
-    return res.status < 500;
-  } catch {
-    return false;
-  }
+/** 用 TCP connect 探测端口是否在监听，比 fetch 更可靠（不受 Electron 网络栈限制） */
+function probePort(port, host = '127.0.0.1') {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, host);
+    const done = (ok) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+    // 1 秒超时
+    socket.setTimeout(1000, () => done(false));
+  });
 }
 
 function createRunner({ nodeBin, paths, log = () => {} }) {
@@ -121,59 +126,35 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
       emitExit({ code, signal, url, port: picked.port });
     });
 
-    // 就绪判定：进程存活且探活通过
+    // 就绪判定：进程存活且端口可连接
     const deadline = Date.now() + (isFirstBoot ? READY_TIMEOUT_FIRST_MS : READY_TIMEOUT_MS);
-    let confirmedCount = 0;
+    let portReady = false; // 端口已就绪标志
     while (Date.now() < deadline) {
       if (earlyExit) {
         throw new Error(`dsh web 提前退出（code=${earlyExit.code} signal=${earlyExit.signal}），详见日志`);
       }
 
-      // 新版内核带 token 鉴权，必须拿到 printedUrl 或经二次确认健康后才算就绪，避免过早返回裸 url 导致 401 白屏
+      // 已拿到官方带 token 地址，立即返回
       if (printedUrl) {
+        log('[runner] 官方 Web 服务已输出授权地址，就绪');
+        return { url: printedUrl, port: picked.port };
+      }
+
+      if (!portReady) {
         // eslint-disable-next-line no-await-in-loop
-        const ok = await probeHealth(url);
+        const ok = await probePort(picked.port);
         if (ok) {
-          log('[runner] 官方 Web 服务已输出地址且健康探测成功');
-          return { url: printedUrl, port: picked.port };
+          portReady = true;
+          log('[runner] 端口已就绪，等待授权地址…');
         }
       }
 
-      // eslint-disable-next-line no-await-in-loop
-      const ok = await probeHealth(url);
-      if (ok) {
-        // 如果已经捕获到了官方带 token 的地址，立即判定就绪返回
-        if (printedUrl) {
-          log('[runner] 官方 Web 服务已输出地址且健康探测成功');
-          return { url: printedUrl, port: picked.port };
-        }
-        confirmedCount += 1;
-        // 内核已监听端口，但 stdout 里的 token 还在生成中，等待 printedUrl 唤醒（最多等 5 秒）
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => {
-          const timer = setTimeout(r, 500);
-          urlNotify = () => {
-            clearTimeout(timer);
-            r();
-          };
-        });
-        if (printedUrl) {
-          log('[runner] 官方 Web 服务已获取授权地址');
-          return { url: printedUrl, port: picked.port };
-        }
-        // 如果连续确认健康超过 10 次（约 5 秒）仍未输出 token，说明是旧版无 token 内核，直接返回裸 url
-        if (confirmedCount >= 10) {
-          log('[runner] 官方 Web 服务已就绪（无鉴权旧版）');
-          return { url, port: picked.port };
-        }
-        continue;
-      }
-      confirmedCount = 0;
-
-      // 快速等待下一个周期，或直到 printedUrl 产生时被立即唤醒
+      // 端口就绪后等待 printedUrl，持续等待直到 deadline（stdout 可能缓冲延迟）
+      // 端口未就绪时快速轮询，或直到 printedUrl 到来被 urlNotify 唤醒
       // eslint-disable-next-line no-await-in-loop
       await new Promise((r) => {
-        const timer = setTimeout(r, POLL_INTERVAL_MS);
+        const waitMs = portReady ? 1000 : POLL_INTERVAL_MS;
+        const timer = setTimeout(r, waitMs);
         urlNotify = () => {
           clearTimeout(timer);
           r();
@@ -181,8 +162,19 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
       });
     }
     await stop();
+    // 超时前最后检查一次 printedUrl（可能在最后 poll 时到达）
+    if (printedUrl) {
+      log('[runner] 官方 Web 服务已输出授权地址（超时前捕获），就绪');
+      return { url: printedUrl, port: picked.port };
+    }
+    if (portReady) {
+      // 端口就绪但始终没有输出 token（旧版无鉴权内核）
+      log('[runner] 官方 Web 服务已就绪（无鉴权旧版），使用裸地址');
+      return { url, port: picked.port };
+    }
     throw new Error('等待服务就绪超时');
   }
+
 
   /** 订阅服务意外退出（app 层用于自动重启）；返回取消函数 */
   function onExit(cb) {
@@ -237,4 +229,4 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
   return { start, stop, isRunning, onExit };
 }
 
-module.exports = { createRunner, pickPort, isPortFree, probeHealth };
+module.exports = { createRunner, pickPort, isPortFree, probePort };

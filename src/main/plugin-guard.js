@@ -299,20 +299,56 @@ function createRegistryChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
 function parseGitHubSpec(range) {
   if (!range || typeof range !== 'string') return null;
   const s = range.trim();
+
+  function extractHash(rawHash) {
+    if (!rawHash) return { ref: 'HEAD', subpath: null };
+    const str = rawHash.trim();
+    let ref = 'HEAD';
+    let subpath = null;
+
+    if (/^path[:=]/i.test(str)) {
+      subpath = str.replace(/^path[:=]/i, '').trim();
+      ref = 'HEAD';
+    } else if (str.includes('&')) {
+      const parts = str.split('&');
+      const pathPart = parts.find((p) => /^path[:=]/i.test(p));
+      if (pathPart) {
+        subpath = pathPart.replace(/^path[:=]/i, '').trim();
+      }
+      const refPart = parts.find((p) => !/^path[:=]/i.test(p));
+      if (refPart) {
+        ref = refPart.replace(/^ref[:=]/i, '').trim() || 'HEAD';
+      }
+    } else {
+      ref = str || 'HEAD';
+    }
+
+    return { ref: ref || 'HEAD', subpath: subpath || null };
+  }
+
   // 1) github:owner/repo(#ref)?
   let m = s.match(/^github:([a-zA-Z0-9._-]+)\/([a-zA-Z0-9._-]+?)(?:\.git)?(?:#(.*))?$/i);
   if (m) {
-    return { owner: m[1], repo: m[2], ref: m[3] || 'HEAD' };
+    const { ref, subpath } = extractHash(m[3]);
+    const res = { owner: m[1], repo: m[2], ref };
+    if (subpath) res.path = subpath;
+    return res;
   }
   // 2) (git+)?https?://github.com/owner/repo(.git)?(#ref)?
   m = s.match(/^(?:git\+)?https?:\/\/github\.com\/([a-zA-Z0-9._-]+)\/([a-zA-Z0-9._-]+?)(?:\.git)?(?:#(.*))?$/i);
   if (m) {
-    return { owner: m[1], repo: m[2], ref: m[3] || 'HEAD' };
+    const { ref, subpath } = extractHash(m[3]);
+    const res = { owner: m[1], repo: m[2], ref };
+    if (subpath) res.path = subpath;
+    return res;
   }
   // 3) git@github.com:owner/repo(.git)?(#ref)?
   m = s.match(/^git@github\.com:([a-zA-Z0-9._-]+)\/([a-zA-Z0-9._-]+?)(?:\.git)?(?:#(.*))?$/i);
   if (m) {
-    return { owner: m[1], repo: m[2], ref: m[3] || 'HEAD' };
+    const { ref, subpath } = extractHash(m[3]);
+    const res = { owner: m[1], repo: m[2], ref };
+    if (subpath) res.path = subpath;
+    return res;
   }
   return null;
 }
@@ -356,28 +392,85 @@ function parseRepoUrl(repo) {
 function getInstalledGitCommit(profileDir, pkgName) {
   const lockFile = path.join(profileDir, 'pnpm-lock.yaml');
   try {
-    const content = fsSync.readFileSync(lockFile, 'utf8');
-    const escaped = pkgName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // 在 importers / dependencies 下匹配 specifier 为 github 或 git，提取紧随的 tar.gz/<sha> 或 version 里的 sha
-    const reg1 = new RegExp(`['"]?${escaped}['"]?:[\\s\\S]*?version:\\s*.*?([0-9a-f]{40})`, 'i');
-    const m1 = content.match(reg1);
-    if (m1) return m1[1];
-    // 或在 packages 段匹配包名对应的 key，提取 40 位 sha
-    const reg2 = new RegExp(`['"]?${escaped}@[^'"]*?([0-9a-f]{40})`, 'i');
-    const m2 = content.match(reg2);
-    if (m2) return m2[1];
+    const lines = fsSync.readFileSync(lockFile, 'utf8').split(/\r?\n/);
+    const escapedName = pkgName.replace(/^['"]|['"]$/g, '');
+
+    // 1) 在 importers / dependencies 段寻找对应依赖项
+    let inTargetDep = false;
+    let targetIndent = -1;
+    for (const line of lines) {
+      const match = line.match(/^(\s*)(['"]?)(.+?)\2:\s*$/);
+      if (match) {
+        const indent = match[1].length;
+        const key = match[3];
+        if (inTargetDep && indent <= targetIndent) {
+          inTargetDep = false;
+        }
+        if (key === escapedName) {
+          inTargetDep = true;
+          targetIndent = indent;
+          continue;
+        }
+      }
+      if (inTargetDep) {
+        const verMatch = line.match(/^\s*version:\s*.*?([0-9a-f]{40})/i);
+        if (verMatch) {
+          return verMatch[1];
+        }
+      }
+    }
+
+    // 2) 若在 dependencies 未直接包含 sha，在 packages 段匹配
+    for (const line of lines) {
+      const pkgMatch = line.match(/^\s*['"]?([^:'"]+)['"]?:\s*$/);
+      if (pkgMatch) {
+        const key = pkgMatch[1];
+        if (key.startsWith(`${escapedName}@`) || key.includes(`/${escapedName}/`)) {
+          const shaMatch = key.match(/([0-9a-f]{40})/i);
+          if (shaMatch) {
+            return shaMatch[1];
+          }
+        }
+      }
+    }
   } catch {}
   return null;
 }
 
 /**
+ * 从 Git Tag 名称中提取合法的语义化版本号（如 v1.2.3 -> 1.2.3, desktop-v3.3.0 -> 3.3.0, dsh-web-v0.3.20 -> 0.3.20）。
+ */
+function extractVersionFromTag(tagName) {
+  if (!tagName || typeof tagName !== 'string') return null;
+  const s = tagName.replace(/\^{}$/, '').trim();
+  const m = s.match(/(?:^|[@/a-zA-Z_-]+?)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/i);
+  return m ? m[1] : null;
+}
+
+/**
+ * 版本号规范化处理：
+ * 将各类命名（如 desktop-v3.3.0, dsh-web v0.3.20, v0.3.20, 0.3.20, release-1.2.3）
+ * 统一规整为干净规范的语义化版本格式：vX.Y.Z（或 vX.Y.Z-rc.1）
+ */
+function normalizeVersionTag(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const s = raw.trim();
+  const ver = extractVersionFromTag(s);
+  if (ver) {
+    return ver.startsWith('v') || ver.startsWith('V') ? ver : `v${ver}`;
+  }
+  return s;
+}
+
+/**
  * GitHub 远端版本与 Commit 检测器：
+ *   - 优先查找仓库的最新 Release 发布版本（Release Tag），无 Release 时兜底默认分支最新代码 Commit Hash
  *   - 优先通过 Smart Git HTTP 协议 (info/refs?service=git-upload-pack) 查询，免除 GitHub REST API 60次/小时的 Rate Limit
- *   - 备选降级至 GitHub REST API (/repos/:owner/:repo/commits/:ref)
+ *   - 备选降级至 GitHub REST API (/repos/:owner/:repo/releases/latest 及 /commits/:ref)
  *   - 5 分钟 TTL 内存缓存与并发去重
  */
 function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
-  const cache = new Map(); // cacheKey -> { sha, shortSha, tag, expiresAt }
+  const cache = new Map(); // cacheKey -> { sha, shortSha, tag, version, isRelease, expiresAt }
   const inflight = new Map(); // cacheKey -> Promise<object|null>
 
   async function fetchLatest(spec) {
@@ -392,8 +485,56 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
     if (cached && cached.expiresAt > now) return cached;
 
     const p = (async () => {
+      // 第 1 优先级（GitHub Releases）：优先请求该仓库的 /releases/latest，获取最新正式发布的 Release Tag 及 Commit SHA
+      if (!ref || ref === 'HEAD') {
+        try {
+          const relUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest`;
+          const res = await fetch(relUrl, {
+            headers: {
+              'User-Agent': 'DeepseekHarnessApp',
+              'Accept': 'application/vnd.github.v3+json',
+            },
+            signal: AbortSignal.timeout(8_000),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.tag_name) {
+              const tag = data.tag_name;
+              const ver = extractVersionFromTag(tag);
+              let relSha = null;
+              try {
+                const tagCommitUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(tag)}`;
+                const tcRes = await fetch(tagCommitUrl, {
+                  headers: { 'User-Agent': 'DeepseekHarnessApp', 'Accept': 'application/vnd.github.v3+json' },
+                  signal: AbortSignal.timeout(6_000),
+                });
+                if (tcRes.ok) {
+                  const tcData = await tcRes.json();
+                  if (tcData && typeof tcData.sha === 'string') relSha = tcData.sha.toLowerCase();
+                }
+              } catch {}
+
+              const finalSha = relSha || tag;
+              const result = {
+                sha: finalSha,
+                shortSha: relSha ? relSha.slice(0, 7) : tag.slice(0, 7),
+                tag,
+                version: ver,
+                isRelease: true,
+                expiresAt: now + ttlMs,
+              };
+              cache.set(cacheKey, result);
+              return result;
+            }
+          }
+        } catch (err) {
+          log(`[github-checker] GitHub releases/latest 查询 ${owner}/${repo} 未命中或受限: ${err.message}`);
+        }
+      }
+
+      // 第 2 优先级（Git Tags）与 第 3 优先级（兜底 HEAD Commit）：
+      // 若无 GitHub Release（或接口受限），通过 Smart Git HTTP 读取所有 Tags / Branches
       try {
-        // 方法 1：Smart Git HTTP 协议，免 GitHub API Rate Limit 限制
         const gitUrl = `https://github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}.git/info/refs?service=git-upload-pack`;
         const res = await fetch(gitUrl, {
           headers: {
@@ -406,7 +547,8 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
         if (res.ok) {
           const text = await res.text();
           let headSha = null;
-          const tags = new Map(); // sha -> tagName
+          const tagToSha = new Map(); // tagName -> sha (优先 peeled tag 的 commit sha)
+          const shaToTag = new Map(); // sha -> tagName
           const branches = new Map(); // branchName -> sha
 
           for (const line of text.split('\n')) {
@@ -419,34 +561,78 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
             } else if (refName.startsWith('refs/heads/')) {
               branches.set(refName.slice('refs/heads/'.length), sha);
             } else if (refName.startsWith('refs/tags/')) {
+              const isPeeled = refName.endsWith('^{}');
               const tagName = refName.slice('refs/tags/'.length).replace(/\^{}$/, '');
-              tags.set(sha, tagName);
+              if (isPeeled || !tagToSha.has(tagName)) {
+                tagToSha.set(tagName, sha);
+              }
+              shaToTag.set(sha, tagName);
             }
           }
 
           let targetSha = null;
           let targetTag = null;
+          let targetVersion = null;
+          let isRelease = false;
 
           if (!ref || ref === 'HEAD') {
-            targetSha = headSha || branches.get('main') || branches.get('master') || null;
+            // 第 2 优先级（Git Tags）：筛选出符合语义化版本规范的最高版本 Tag
+            const candidateTags = [];
+            for (const [tName, tSha] of tagToSha.entries()) {
+              const ver = extractVersionFromTag(tName);
+              if (ver) {
+                candidateTags.push({ tag: tName, version: ver, sha: tSha });
+              }
+            }
+
+            if (candidateTags.length > 0) {
+              const { compareVersions } = require('./semver');
+              candidateTags.sort((a, b) => compareVersions(b.version, a.version));
+              const best = candidateTags[0];
+              targetSha = best.sha;
+              targetTag = best.tag;
+              targetVersion = best.version;
+              isRelease = true;
+            } else {
+              // 第 3 优先级（兜底 HEAD Commit）：若该仓库没有任何 Release 和版本 Tag，才使用分支最新代码 Commit Hash
+              targetSha = headSha || branches.get('main') || branches.get('master') || null;
+              targetTag = null;
+              targetVersion = null;
+              isRelease = false;
+            }
           } else if (branches.has(ref)) {
             targetSha = branches.get(ref);
+          } else if (tagToSha.has(ref)) {
+            targetSha = tagToSha.get(ref);
+            targetTag = ref;
+            targetVersion = extractVersionFromTag(ref);
+            isRelease = Boolean(targetVersion);
           } else {
-            for (const [sha, tName] of tags.entries()) {
+            for (const [tName, tSha] of tagToSha.entries()) {
               if (tName === ref) {
-                targetSha = sha;
+                targetSha = tSha;
                 targetTag = tName;
+                targetVersion = extractVersionFromTag(tName);
+                isRelease = Boolean(targetVersion);
                 break;
               }
+            }
+            if (!targetSha && /^[0-9a-f]{40}$/i.test(ref)) {
+              targetSha = ref.toLowerCase();
             }
           }
 
           if (targetSha) {
-            targetTag = targetTag || tags.get(targetSha) || null;
+            targetTag = targetTag || shaToTag.get(targetSha) || null;
+            if (!targetVersion && targetTag) {
+              targetVersion = extractVersionFromTag(targetTag);
+            }
             const result = {
               sha: targetSha,
               shortSha: targetSha.slice(0, 7),
               tag: targetTag,
+              version: targetVersion,
+              isRelease: Boolean(targetTag),
               expiresAt: now + ttlMs,
             };
             cache.set(cacheKey, result);
@@ -457,7 +643,7 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
         log(`[github-checker] Smart HTTP 查询 ${owner}/${repo} 失败: ${err.message}，尝试 API 降级…`);
       }
 
-      // 方法 2：降级至 GitHub REST API
+      // 最后兜底：若 Smart HTTP 也失败，降级至请求 GitHub API /commits/:ref
       try {
         const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref || 'HEAD')}`;
         const res = await fetch(apiUrl, {
@@ -475,6 +661,8 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
               sha,
               shortSha: sha.slice(0, 7),
               tag: null,
+              version: null,
+              isRelease: false,
               expiresAt: now + ttlMs,
             };
             cache.set(cacheKey, result);
@@ -563,12 +751,16 @@ async function checkProfileUpdates(profileDir, { registry, githubChecker, log = 
 
   for (const d of third) {
     const ghSpec = parseGitHubSpec(d.range);
+    // 只有 range 本身是 GitHub 格式（github:owner/repo 或 owner/repo#ref 等）才走 GitHub 检查
+    // npm 包即便其 package.json 内部 repository 指向 GitHub，也只监控 npm 版本
     if (ghSpec) {
-      ghDeps.push({ dep: d, spec: ghSpec });
+      const installedSha = getInstalledGitCommit(profileDir, d.name);
+      ghDeps.push({ dep: d, spec: ghSpec, installedSha });
     } else {
       npmDeps.push(d);
     }
   }
+
 
   const [npmLatestMap] = await Promise.all([
     reg.fetchLatestMany(npmDeps.map((d) => d.name)),
@@ -593,29 +785,48 @@ async function checkProfileUpdates(profileDir, { registry, githubChecker, log = 
     const installedVer = readJson(path.join(profileDir, 'node_modules', dep.name, 'package.json'))?.version;
 
     if (!remote || !installedSha) {
+      const normTag = remote?.tag ? normalizeVersionTag(remote.tag) : null;
       results.push({
         name: dep.name,
         range: dep.range,
-        latest: remote ? (remote.tag ? `${remote.tag} (${remote.shortSha})` : remote.shortSha) : null,
+        latest: remote ? (normTag ? (remote.shortSha ? `${normTag} (${remote.shortSha})` : normTag) : remote.shortSha) : null,
         status: 'unknown',
         isGitHub: true,
       });
       continue;
     }
 
-    const isMatch = remote.sha.toLowerCase() === installedSha.toLowerCase();
-    const latestLabel = remote.tag ? `${remote.tag} (${remote.shortSha})` : remote.shortSha;
-    const installedLabel = installedVer ? `${installedVer} (${installedSha.slice(0, 7)})` : installedSha.slice(0, 7);
+    let isCurrent = false;
+    if (remote.sha && installedSha && remote.sha.toLowerCase() === installedSha.toLowerCase()) {
+      isCurrent = true;
+    } else if (remote.version && installedVer) {
+      const { compareVersions } = require('./semver');
+      if (compareVersions(remote.version, installedVer) <= 0) {
+        isCurrent = true;
+      }
+    }
+
+    const normTag = remote.tag ? normalizeVersionTag(remote.tag) : null;
+    const latestLabel = normTag
+      ? (remote.shortSha ? `${normTag} (${remote.shortSha})` : normTag)
+      : remote.shortSha;
+    const normInstalledVer = installedVer ? normalizeVersionTag(installedVer) : null;
+    const fromLabel = normInstalledVer
+      ? (installedSha ? `${normInstalledVer} (${installedSha.slice(0, 7)})` : normInstalledVer)
+      : installedSha.slice(0, 7);
 
     results.push({
       name: dep.name,
       range: dep.range,
       latest: latestLabel,
-      from: installedLabel,
-      status: isMatch ? 'current' : 'outdated',
+      from: fromLabel,
+      status: isCurrent ? 'current' : 'outdated',
       isGitHub: true,
       installedSha,
       remoteSha: remote.sha,
+      targetTag: remote.tag || null,
+      targetRef: remote.tag || remote.sha || null,
+      isRelease: Boolean(remote.isRelease),
     });
   }
 
@@ -666,11 +877,37 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
     if (ghSpec) {
       const oldSha = getInstalledGitCommit(profileDir, name);
       const oldVer = readJson(path.join(profileDir, 'node_modules', name, 'package.json'))?.version;
+      let targetRef = item.target || 'latest';
+      if (typeof targetRef === 'string') {
+        targetRef = targetRef.replace(/\s*\([0-9a-fA-F]+\)$/, '').trim();
+      }
+
+      if (!targetRef || targetRef === 'latest') {
+        try {
+          const gh = githubChecker || createGitHubChecker({ log });
+          const release = await gh.fetchLatest(ghSpec);
+          if (release && release.tag) {
+            targetRef = release.tag;
+          } else {
+            targetRef = null;
+          }
+        } catch {}
+      }
+
+      let newRange = oldRange;
+      if (targetRef && targetRef !== 'latest') {
+        if (ghSpec.path) {
+          newRange = `github:${ghSpec.owner}/${ghSpec.repo}#${targetRef}&path:${ghSpec.path}`;
+        } else {
+          newRange = `github:${ghSpec.owner}/${ghSpec.repo}#${targetRef}`;
+        }
+      }
+
       validItems.push({
         name,
         oldRange,
-        target: item.target || 'latest',
-        targetRange: oldRange, // GitHub 依赖严禁改写为 npm 版本
+        target: targetRef,
+        targetRange: newRange,
         isGitHub: true,
         oldSha,
         oldVer,
@@ -679,6 +916,9 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
     }
 
     let target = item.target || 'latest';
+    if (typeof target === 'string') {
+      target = target.replace(/\s*\([0-9a-fA-F]+\)$/, '').trim();
+    }
     // 若未指定或为 latest，尝试向 registry 查询最新版本号
     if (target === 'latest') {
       try {
@@ -705,6 +945,10 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
     if (!v.isGitHub) {
       pkg.dependencies[v.name] = v.targetRange;
       log(`[guard] ${path.basename(profileDir)}: ${v.name} ${v.oldRange} → ${v.targetRange}`);
+      pkgModified = true;
+    } else if (v.oldRange !== v.targetRange) {
+      pkg.dependencies[v.name] = v.targetRange;
+      log(`[guard] ${path.basename(profileDir)}: (GitHub) ${v.name} ${v.oldRange} → ${v.targetRange}`);
       pkgModified = true;
     }
   }
@@ -743,8 +987,8 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
   const npmItems = validItems.filter((v) => !v.isGitHub);
 
   try {
-    // 1) 如果包含 npm 依赖更新，执行 pnpm install
-    if (npmItems.length > 0) {
+    // 1) 若 package.json 依赖范围发生变更或包含 npm 依赖，执行 pnpm install
+    if (pkgModified || npmItems.length > 0) {
       await runPnpm(
         nodeBin,
         pnpmCjs,
@@ -759,9 +1003,10 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
       );
     }
 
-    // 2) 如果包含 GitHub 依赖更新，调用 pnpm update 强制拉取远端最新 commit
-    if (githubItems.length > 0) {
-      const ghNames = githubItems.map((v) => v.name);
+    // 2) 如果包含未改动 package.json 范围的 GitHub 依赖（如分支最新提交追踪），调用 pnpm update 强制拉取
+    const ghNeedUpdate = githubItems.filter((v) => !pkgModified || v.oldRange === v.targetRange);
+    if (ghNeedUpdate.length > 0) {
+      const ghNames = ghNeedUpdate.map((v) => v.name);
       await runPnpm(
         nodeBin,
         pnpmCjs,
@@ -788,11 +1033,12 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
 
         const shaChanged = newSha && v.oldSha && newSha.toLowerCase() !== v.oldSha.toLowerCase();
         const verChanged = newVer && v.oldVer && newVer !== v.oldVer;
+        const rangeChanged = v.oldRange !== v.targetRange;
 
         const fromLabel = v.oldSha ? v.oldSha.slice(0, 7) : (v.oldVer || v.oldRange);
         const toLabel = newSha ? newSha.slice(0, 7) : (newVer || 'latest');
 
-        if (shaChanged || verChanged) {
+        if (shaChanged || verChanged || rangeChanged) {
           report.push({
             name: v.name,
             from: fromLabel,
@@ -804,8 +1050,8 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
             name: v.name,
             from: fromLabel,
             to: toLabel,
-            ok: false,
-            error: `已装版本未提升（Commit 未变更），更新未生效`,
+            ok: true,
+            message: '当前已是最新版本',
           });
         }
       } else {
@@ -816,7 +1062,6 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
           pkgFinalModified = true;
         }
 
-        // 验证版本是否真正发生变更（排除由于 lockfile 锁定未更新并写回旧版的情形）
         if (installed?.version && finalRange === v.oldRange) {
           report.push({
             name: v.name,
@@ -1175,6 +1420,24 @@ async function installPluginToProfile(
     rawSpec.startsWith('file:')
   ) {
     targetRange = rawSpec;
+    const ghSpec = parseGitHubSpec(rawSpec);
+    // 若属于 GitHub 依赖且用户未显式锁定特定 commit/tag（即未指定 ref 或 ref 为 HEAD）：优先查询并锁定最新 Release
+    if (ghSpec && (!ghSpec.ref || ghSpec.ref === 'HEAD')) {
+      try {
+        const gh = createGitHubChecker({ log });
+        const release = await gh.fetchLatest(ghSpec);
+        if (release && release.tag) {
+          if (ghSpec.path) {
+            targetRange = `github:${ghSpec.owner}/${ghSpec.repo}#${release.tag}&path:${ghSpec.path}`;
+          } else {
+            targetRange = `github:${ghSpec.owner}/${ghSpec.repo}#${release.tag}`;
+          }
+          log(`[guard] 优先锁定安装 ${name} 最新 Release 发布版本: ${targetRange} (${release.tag})`);
+        }
+      } catch (err) {
+        log(`[guard] 查询 ${name} Release 失败: ${err.message}，从默认分支源码安装`);
+      }
+    }
   } else if (!rawSpec || rawSpec === name || rawSpec === 'latest') {
     targetRange = 'latest';
   } else if (/^[\^~>=<]/.test(rawSpec)) {

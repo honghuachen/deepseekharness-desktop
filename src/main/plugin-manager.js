@@ -24,6 +24,7 @@ const {
   togglePluginBundle,
   parseGitHubSpec,
   parseRepoUrl,
+  getInstalledGitCommit,
 } = require('./plugin-guard');
 const { fetchMarketTop100 } = require('./market/market-service');
 
@@ -211,11 +212,14 @@ function buildInventory(dshHome) {
         let npmUrl = null;
         let displayName = null;
         let description = null;
+        let installedVersion = null;
+        let installedSha = null;
+        const ghSpec = !d.official ? parseGitHubSpec(d.range) : null;
 
         if (!d.official) {
-          const ghSpec = parseGitHubSpec(d.range);
           if (ghSpec) {
             githubUrl = `https://github.com/${ghSpec.owner}/${ghSpec.repo}`;
+            installedSha = getInstalledGitCommit(dir, d.name);
           } else if (!/^(git\+|github:|gitlab:|bitbucket:|file:|workspace:|link:|portal:|http:|https:)/i.test(d.range)) {
             npmUrl = `https://www.npmjs.com/package/${d.name}`;
           }
@@ -225,6 +229,9 @@ function buildInventory(dshHome) {
           if (fsSync.existsSync(installedPkgPath)) {
             try {
               const installedPkg = JSON.parse(fsSync.readFileSync(installedPkgPath, 'utf8'));
+              if (installedPkg.version && typeof installedPkg.version === 'string') {
+                installedVersion = installedPkg.version;
+              }
               const repoUrl = parseRepoUrl(installedPkg.repository) || parseRepoUrl(installedPkg.homepage);
               if (repoUrl) {
                 githubUrl = repoUrl;
@@ -256,6 +263,9 @@ function buildInventory(dshHome) {
           inPatch: false,
           githubUrl,
           npmUrl,
+          installedVersion,
+          installedSha: installedSha ? installedSha.slice(0, 7) : null,
+          isGitHub: Boolean(ghSpec),
         });
       }
       for (const ins of inv.inserts) {
@@ -401,7 +411,7 @@ function registerIpc(context) {
           registry: reg,
           githubChecker: gh,
         });
-        if (result.ok && result.from !== result.to) {
+        if (result.ok) {
           invalidateUpdatesCache(context.dshHome(), profile, [name]);
           context.onUpdatesCacheChanged?.();
         }
@@ -443,7 +453,7 @@ function registerIpc(context) {
         githubChecker: gh,
       });
 
-      const okNames = report.filter((r) => r.ok && r.from !== r.to).map((r) => r.name);
+      const okNames = report.filter((r) => r.ok).map((r) => r.name);
       if (okNames.length) {
         invalidateUpdatesCache(context.dshHome(), profile, okNames);
         context.onUpdatesCacheChanged?.();

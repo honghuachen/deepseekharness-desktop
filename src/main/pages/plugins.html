@@ -766,7 +766,7 @@ function statusTagFor(item, p) {
   if (st.updating) return '<span class="spinner" title="更新中…"></span>';
   if (st.loading) return '<span class="spinner" title="检查中…"></span>';
   if (st.status === 'outdated') {
-    return `<span class="tag update" title="当前 ${esc(st.from || item.range)}">有新版 ${esc(st.latest || '?')}</span>`;
+    return '';
   }
   if (st.status === 'current') {
     return `<span class="tag current" title="最新版本 ${esc(st.latest || '')}">已是最新</span>`;
@@ -788,10 +788,28 @@ function updateBtnFor(item, p) {
   if (!st) return '';
   if (st.updating) return '<button class="btn-update" disabled>更新中…</button>';
   if (st.loading) return '';
-  if (st.status === 'outdated') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="${esc(st.latest || 'latest')}">更新到 ${esc(st.latest || 'latest')}</button>`;
+  if (st.status === 'outdated') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="${esc(st.targetRef || st.targetTag || st.latest || 'latest')}">更新到 ${esc(st.latest || 'latest')}</button>`;
   if (st.status === 'unknown') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">更新</button>`;
   if (st.status === 'failed') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">重试</button>`;
   return '';
+}
+
+function rangeCellFor(item) {
+  const raw = item.range || '';
+  if (!item.isGitHub) {
+    return esc(raw);
+  }
+  let v = '';
+  if (item.installedVersion && item.installedVersion !== 'unknown' && item.installedVersion !== '0.0.0') {
+    v = item.installedVersion.startsWith('v') || item.installedVersion.startsWith('V')
+      ? item.installedVersion
+      : `v${item.installedVersion}`;
+  }
+  const sha = item.installedSha ? item.installedSha.slice(0, 7) : '';
+  if (v && sha) return `${esc(v)} (${esc(sha)})`;
+  if (v) return esc(v);
+  if (sha) return esc(sha);
+  return esc(raw);
 }
 
 function renderRow(profile, item) {
@@ -804,7 +822,9 @@ function renderRow(profile, item) {
       <td class="upd"></td></tr>`;
   }
   const checked = selected.get(profile)?.has(key) ? 'checked' : '';
-  const updCell = removable ? `${statusTagFor(item, profile)} ${updateBtnFor(item, profile)}` : '';
+  const statusTag = statusTagFor(item, profile);
+  const updBtn = updateBtnFor(item, profile);
+  const updCell = removable ? [statusTag, updBtn].filter(Boolean).join(' ') : '';
 
   const badges = [];
   if (removable) {
@@ -862,10 +882,12 @@ function renderRow(profile, item) {
     }
   }
 
+  const rangeTitle = item.isGitHub ? `依赖来源: ${esc(item.range)}` : esc(item.range);
+
   return `<tr>
     <td class="chk">${removable ? `<input type="checkbox" data-profile="${esc(profile)}" data-key="${esc(key)}" ${checked} ${RESTARTING ? 'disabled' : ''} onchange="onToggle(this)">` : ''}</td>
     <td class="name">${nameHtml}</td>
-    <td class="range" title="${esc(item.range)}">${esc(item.range)}</td>
+    <td class="range" title="${rangeTitle}">${rangeCellFor(item)}</td>
     <td class="refs">${item.official ? '<span class="tag official">官方</span>' : '<span class="tag third">第三方</span>'}${refsTags(item)}${bundleActionBtn}</td>
     <td class="upd">${updCell}</td>
   </tr>`;
@@ -1552,7 +1574,7 @@ async function updateAll(profile) {
   const m = getOrCreateMap(profile);
   const items = [];
   for (const [k, s] of m) {
-    if (s.status === 'outdated') items.push({ name: k, target: s.latest || 'latest' });
+    if (s.status === 'outdated') items.push({ name: k, target: s.targetRef || s.targetTag || s.latest || 'latest' });
   }
   if (items.length === 0) return;
   for (const item of items) {
@@ -1582,7 +1604,11 @@ async function updateAll(profile) {
 function showUpdateResult(profile, res) {
   const lines = [];
   if (res.ok) {
-    lines.push(`<div class="ok">✓ ${esc(profile)} · ${esc(res.name)}：${esc(res.from)} → ${esc(res.to || res.to)}</div>`);
+    if (res.from === res.to || !res.to) {
+      lines.push(`<div class="ok">✓ ${esc(profile)} · ${esc(res.name)}：当前已是最新版本 (${esc(res.to || res.from)})</div>`);
+    } else {
+      lines.push(`<div class="ok">✓ ${esc(profile)} · ${esc(res.name)}：${esc(res.from)} → ${esc(res.to)}</div>`);
+    }
   } else {
     lines.push(`<div class="err">✗ ${esc(profile)} · ${esc(res.name || '?')}：${esc(res.error || '失败')}</div>`);
   }

@@ -426,6 +426,18 @@ async function main() {
     assert.deepEqual(parseGitHubSpec('git+https://github.com/foo/bar.git'), { owner: 'foo', repo: 'bar', ref: 'HEAD' });
     assert.deepEqual(parseGitHubSpec('https://github.com/foo/bar#v1.0.0'), { owner: 'foo', repo: 'bar', ref: 'v1.0.0' });
     assert.deepEqual(parseGitHubSpec('git@github.com:foo/bar.git'), { owner: 'foo', repo: 'bar', ref: 'HEAD' });
+    assert.deepEqual(parseGitHubSpec('github:ningbainb/deepseek-harness-desktop#path:packages/skins/blue-fantasy'), {
+      owner: 'ningbainb',
+      repo: 'deepseek-harness-desktop',
+      ref: 'HEAD',
+      path: 'packages/skins/blue-fantasy',
+    });
+    assert.deepEqual(parseGitHubSpec('github:ningbainb/deepseek-harness-desktop#main&path:packages/skins/blue-fantasy'), {
+      owner: 'ningbainb',
+      repo: 'deepseek-harness-desktop',
+      ref: 'main',
+      path: 'packages/skins/blue-fantasy',
+    });
     assert.equal(parseGitHubSpec('^1.0.0'), null);
     assert.equal(parseGitHubSpec('lodash'), null);
     assert.equal(parseGitHubSpec(''), null);
@@ -505,6 +517,90 @@ packages:
     }
   });
 
+  await t('第 1 优先级：优先请求 GitHub releases/latest 获取最新正式 Release', async () => {
+    const checker = createGitHubChecker();
+    const orig = global.fetch;
+    let releaseApiHit = false;
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('releases/latest')) {
+        releaseApiHit = true;
+        return new Response(JSON.stringify({ tag_name: 'v0.3.20' }), { status: 200 });
+      }
+      if (u.includes('commits/v0.3.20')) {
+        return new Response(JSON.stringify({ sha: '3333444455556666777788889999000011112222' }), { status: 200 });
+      }
+      return new Response('Not Found', { status: 404 });
+    };
+    try {
+      const res = await checker.fetchLatest('github:zhu1090093659/dsh-web');
+      assert.equal(releaseApiHit, true);
+      assert.equal(res.tag, 'v0.3.20');
+      assert.equal(res.version, '0.3.20');
+      assert.equal(res.isRelease, true);
+      assert.equal(res.sha, '3333444455556666777788889999000011112222');
+      assert.equal(res.shortSha, '3333444');
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
+  await t('第 2 优先级：无 releases/latest 时，通过 Git Tags 筛选最高版本 Release Tag（忽略 HEAD commit）', async () => {
+    const checker = createGitHubChecker();
+    const orig = global.fetch;
+    const fakeGitUploadPack = `
+000001599999999999999999999999999999999999999999 HEAD
+00461111111111111111111111111111111111111111 refs/tags/v1.0.0
+00462222222222222222222222222222222222222222 refs/tags/v2.1.0
+00492222222222222222222222222222222222222222 refs/tags/v2.1.0^{}
+00463333333333333333333333333333333333333333 refs/tags/v1.5.0
+0000`;
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('releases/latest')) {
+        return new Response('Not Found', { status: 404 });
+      }
+      if (u.includes('info/refs')) {
+        return new Response(fakeGitUploadPack, { status: 200 });
+      }
+      return new Response('Not Found', { status: 404 });
+    };
+    try {
+      const res = await checker.fetchLatest('github:test/multi-tag-repo');
+      assert.equal(res.tag, 'v2.1.0');
+      assert.equal(res.version, '2.1.0');
+      assert.equal(res.sha, '2222222222222222222222222222222222222222');
+      assert.equal(res.isRelease, true);
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
+  await t('第 3 优先级：无任何 Release 和版本 Tag 时，兜底使用默认分支最新代码 Commit Hash', async () => {
+    const checker = createGitHubChecker();
+    const orig = global.fetch;
+    const fakeGitUploadPack = `
+000001598888888888888888888888888888888888888888 HEAD
+00468888888888888888888888888888888888888888 refs/heads/main
+0000`;
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('releases/latest')) return new Response('Not Found', { status: 404 });
+      if (u.includes('info/refs')) return new Response(fakeGitUploadPack, { status: 200 });
+      return new Response('Not Found', { status: 404 });
+    };
+    try {
+      const res = await checker.fetchLatest('github:test/no-tag-repo');
+      assert.equal(res.tag, null);
+      assert.equal(res.version, null);
+      assert.equal(res.isRelease, false);
+      assert.equal(res.sha, '8888888888888888888888888888888888888888');
+      assert.equal(res.shortSha, '8888888');
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
   process.stdout.write('checkProfileUpdates (GitHub 依赖):\n');
   await t('commit 一致 → current (已是最新)', async () => {
     const dir = tmpProfile();
@@ -531,6 +627,40 @@ importers:
       assert.equal(out[0].status, 'current');
       assert.equal(out[0].latest, 'd6e583c');
       assert.equal(out[0].isGitHub, true);
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
+  await t('npm 包即使 package.json 中有 GitHub 仓库地址，未走 git 安装仍走 npm 检查', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo-npm-repo',
+      private: true,
+      dependencies: { 'dsh-inherit': '^0.1.0' },
+    }, null, 2) + '\n');
+    fs.mkdirSync(path.join(dir, 'node_modules', 'dsh-inherit'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'dsh-inherit', 'package.json'), JSON.stringify({
+      name: 'dsh-inherit',
+      version: '0.1.0',
+      repository: { type: 'git', url: 'https://github.com/MayBeTheWorld/dsh-inherit.git' },
+    }));
+    const reg = createRegistryChecker();
+    const orig = global.fetch;
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('registry.npmjs.org')) {
+        return new Response(JSON.stringify({ version: '0.1.0' }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    };
+    try {
+      const out = await checkProfileUpdates(dir, { registry: reg });
+      assert.equal(out.length, 1);
+      assert.equal(out[0].name, 'dsh-inherit');
+      assert.equal(out[0].status, 'current');
+      assert.equal(out[0].latest, '0.1.0');
+      assert.equal(out[0].isGitHub, undefined);
     } finally {
       global.fetch = orig;
     }
@@ -803,6 +933,52 @@ importers:
     assert.deepEqual(pkgAfter, originalPkg);
   });
 
+  await t('安装 GitHub 依赖时：若仓库有 Release 则优先锁定最新 Release Tag', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({
+        name: 'test-profile-gh-release',
+        dependencies: {},
+        dsh: { profile: { bundles: [] } },
+      }),
+    );
+
+    const mockPnpm = path.join(dir, 'fake-pnpm-gh-rel.cjs');
+    fs.writeFileSync(
+      mockPnpm,
+      `
+      const fs = require('node:fs');
+      const path = require('node:path');
+      const modDir = path.join(process.cwd(), 'node_modules', 'awesome-gh-plugin');
+      fs.mkdirSync(modDir, { recursive: true });
+      fs.writeFileSync(path.join(modDir, 'package.json'), JSON.stringify({ name: 'awesome-gh-plugin', version: '2.5.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+      `,
+    );
+
+    const orig = global.fetch;
+    global.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('releases/latest')) {
+        return new Response(JSON.stringify({ tag_name: 'v2.5.0' }), { status: 200 });
+      }
+      return new Response('Not Found', { status: 404 });
+    };
+
+    try {
+      const res = await installPluginToProfile(
+        dir,
+        { name: 'awesome-gh-plugin', installSpec: 'github:my-org/awesome-gh-plugin' },
+        { nodeBin: process.execPath, pnpmCjs: mockPnpm },
+      );
+      assert.equal(res.ok, true);
+      const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+      assert.equal(pkg.dependencies['awesome-gh-plugin'], 'github:my-org/awesome-gh-plugin#v2.5.0');
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
   process.stdout.write('plugins.html 插件状态与更新按钮逻辑:\n');
   await t('未检查状态下绝不展示「更新」按钮，仅展示「未检查」标签', async () => {
     const htmlContent = fs.readFileSync(path.join(__dirname, '../src/main/pages/plugins.html'), 'utf8');
@@ -844,7 +1020,7 @@ importers:
     m.set('dsh-pet', { loading: false, updating: false, status: 'outdated', latest: '0.2.8' });
     const tagOutdated = statusTagFor(item, 'web', updateState, esc);
     const btnOutdated = updateBtnFor(item, 'web', updateState, esc);
-    assert.match(tagOutdated, /有新版/);
+    assert.equal(tagOutdated, '', '有新版时直接显示更新按钮，不重复显示“有新版”标签');
     assert.match(btnOutdated, /更新到 0\.2\.8/);
 
     // 5. 更新中状态 (updating: true)
