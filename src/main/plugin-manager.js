@@ -555,11 +555,34 @@ function registerIpc(context) {
         log: context.log,
       });
 
+      if (res.ok) {
+        // 新安装插件默认视为最新版本（无需刚安装完就提示需要更新或显示未检查）
+        const cache = readUpdatesCache(home) || { checkedAt: new Date().toISOString(), profiles: {} };
+        cache.profiles = cache.profiles || {};
+        const profileList = Array.isArray(cache.profiles[profile]) ? cache.profiles[profile] : [];
+        const existingIdx = profileList.findIndex((u) => u?.name === res.name);
+        const entry = {
+          name: res.name,
+          range: res.range,
+          latest: res.version,
+          status: 'current',
+        };
+        if (existingIdx >= 0) {
+          profileList[existingIdx] = entry;
+        } else {
+          profileList.push(entry);
+        }
+        cache.profiles[profile] = profileList;
+        writeUpdatesCache(home, cache);
+        context.onUpdatesCacheChanged?.();
+      }
+
       return {
         ...res,
         profile,
         needsRestart: Boolean(res.ok),
         profiles: buildInventory(home),
+        updateCache: readUpdatesCache(home),
       };
     }
     throw new Error(`未知命令 ${cmd}`);

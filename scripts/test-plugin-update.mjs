@@ -803,6 +803,58 @@ importers:
     assert.deepEqual(pkgAfter, originalPkg);
   });
 
+  process.stdout.write('plugins.html 插件状态与更新按钮逻辑:\n');
+  await t('未检查状态下绝不展示「更新」按钮，仅展示「未检查」标签', async () => {
+    const htmlContent = fs.readFileSync(path.join(__dirname, '../src/main/pages/plugins.html'), 'utf8');
+    const statusTagMatch = htmlContent.match(/function statusTagFor\(item, p\) \{([\s\S]*?)\n\}/);
+    const updateBtnMatch = htmlContent.match(/function updateBtnFor\(item, p\) \{([\s\S]*?)\n\}/);
+    assert.ok(statusTagMatch, '能提取 statusTagFor 函数');
+    assert.ok(updateBtnMatch, '能提取 updateBtnFor 函数');
+
+    const updateState = new Map();
+    const esc = (s) => s;
+    const statusTagFor = new Function('item', 'p', 'updateState', 'esc', statusTagMatch[1]);
+    const updateBtnFor = new Function('item', 'p', 'updateState', 'esc', updateBtnMatch[1]);
+
+    const item = { name: 'dsh-pet', rawName: 'dsh-pet', range: '^0.2.7' };
+
+    // 1. 未检查状态（updateState 为空或未包含该插件）
+    const tagUnchecked = statusTagFor(item, 'web', updateState, esc);
+    const btnUnchecked = updateBtnFor(item, 'web', updateState, esc);
+    assert.match(tagUnchecked, /未检查/);
+    assert.equal(btnUnchecked, '', '未检查状态下更新按钮必须为空字符串，不可展示更新按钮');
+
+    // 2. 检查中状态 (loading: true, updating: false)
+    const m = new Map();
+    updateState.set('web', m);
+    m.set('dsh-pet', { loading: true, updating: false });
+    const tagChecking = statusTagFor(item, 'web', updateState, esc);
+    const btnChecking = updateBtnFor(item, 'web', updateState, esc);
+    assert.match(tagChecking, /检查中/);
+    assert.equal(btnChecking, '', '正在检查时更新按钮必须为空，不误显更新中或更新');
+
+    // 3. 已是最新状态 (status: current)
+    m.set('dsh-pet', { loading: false, updating: false, status: 'current', latest: '0.2.7' });
+    const tagCurrent = statusTagFor(item, 'web', updateState, esc);
+    const btnCurrent = updateBtnFor(item, 'web', updateState, esc);
+    assert.match(tagCurrent, /已是最新/);
+    assert.equal(btnCurrent, '', '已是最新时更新按钮为空');
+
+    // 4. 有新版状态 (status: outdated)
+    m.set('dsh-pet', { loading: false, updating: false, status: 'outdated', latest: '0.2.8' });
+    const tagOutdated = statusTagFor(item, 'web', updateState, esc);
+    const btnOutdated = updateBtnFor(item, 'web', updateState, esc);
+    assert.match(tagOutdated, /有新版/);
+    assert.match(btnOutdated, /更新到 0\.2\.8/);
+
+    // 5. 更新中状态 (updating: true)
+    m.set('dsh-pet', { loading: true, updating: true });
+    const tagUpdating = statusTagFor(item, 'web', updateState, esc);
+    const btnUpdating = updateBtnFor(item, 'web', updateState, esc);
+    assert.match(tagUpdating, /更新中/);
+    assert.match(btnUpdating, /disabled>更新中…/);
+  });
+
   if (failed) {
     process.stdout.write(`\n共 ${failed} 项断言失败\n`);
     process.exit(1);

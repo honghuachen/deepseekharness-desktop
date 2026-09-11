@@ -763,6 +763,7 @@ function refsTags(item) {
 function statusTagFor(item, p) {
   const st = updateState.get(p)?.get(item.rawName || item.name);
   if (!st) return '<span class="tag unknown" title="未检查">未检查</span>';
+  if (st.updating) return '<span class="spinner" title="更新中…"></span>';
   if (st.loading) return '<span class="spinner" title="检查中…"></span>';
   if (st.status === 'outdated') {
     return `<span class="tag update" title="当前 ${esc(st.from || item.range)}">有新版 ${esc(st.latest || '?')}</span>`;
@@ -784,8 +785,9 @@ function statusTagFor(item, p) {
 
 function updateBtnFor(item, p) {
   const st = updateState.get(p)?.get(item.rawName || item.name);
-  if (!st) return '<button class="btn-update" data-act="upd-one" data-profile="' + esc(p) + '" data-key="' + esc(item.rawName || item.name) + '">更新</button>';
-  if (st.loading) return '<button class="btn-update" disabled>更新中…</button>';
+  if (!st) return '';
+  if (st.updating) return '<button class="btn-update" disabled>更新中…</button>';
+  if (st.loading) return '';
   if (st.status === 'outdated') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="${esc(st.latest || 'latest')}">更新到 ${esc(st.latest || 'latest')}</button>`;
   if (st.status === 'unknown') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">更新</button>`;
   if (st.status === 'failed') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">重试</button>`;
@@ -1253,6 +1255,21 @@ async function triggerInstall(key) {
       plugin.installedProfiles = [...new Set([...(plugin.installedProfiles || []), targetProfile])];
       plugin.isInstalled = true;
       if (Array.isArray(res.profiles)) DATA = res.profiles;
+      if (res.updateCache) applyUpdateCache(res.updateCache);
+
+      // 新安装插件刚安装成功，更新状态记录为已是最新
+      const m = getOrCreateMap(targetProfile);
+      const pkgName = res.name || plugin.packageName || plugin.name;
+      if (pkgName) {
+        m.set(pkgName, {
+          loading: false,
+          updating: false,
+          latest: res.version || plugin.version,
+          from: res.range,
+          status: 'current',
+          error: null,
+        });
+      }
       render();
 
       if (res.needsRestart) {
@@ -1361,7 +1378,7 @@ async function checkProfile(profile) {
   const p = DATA.find((x) => x.profile === profile);
   if (!p) return;
   for (const i of p.items) {
-    if (!i.official) m.set(i.rawName || i.name, { ...(m.get(i.rawName || i.name) || {}), loading: true });
+    if (!i.official) m.set(i.rawName || i.name, { ...(m.get(i.rawName || i.name) || {}), loading: true, updating: false });
   }
   render();
   try {
@@ -1371,6 +1388,7 @@ async function checkProfile(profile) {
       for (const u of list) {
         m.set(u.name, {
           loading: false,
+          updating: false,
           latest: u.latest,
           from: u.from || u.range,
           status: u.status,
@@ -1380,7 +1398,7 @@ async function checkProfile(profile) {
     }
   } catch (err) {
     for (const i of p.items) {
-      if (!i.official) m.set(i.rawName || i.name, { loading: false, status: 'unknown', error: err.message });
+      if (!i.official) m.set(i.rawName || i.name, { loading: false, updating: false, status: 'unknown', error: err.message });
     }
   }
   render();
@@ -1391,7 +1409,7 @@ async function checkAllUpdates() {
   for (const p of DATA) {
     const m = getOrCreateMap(p.profile);
     for (const i of p.items) {
-      if (!i.official) m.set(i.rawName || i.name, { ...(m.get(i.rawName || i.name) || {}), loading: true });
+      if (!i.official) m.set(i.rawName || i.name, { ...(m.get(i.rawName || i.name) || {}), loading: true, updating: false });
     }
   }
   render();
@@ -1403,6 +1421,7 @@ async function checkAllUpdates() {
       for (const u of list) {
         m.set(u.name, {
           loading: false,
+          updating: false,
           latest: u.latest,
           from: u.from || u.range,
           status: u.status,
@@ -1496,19 +1515,19 @@ $('#confirmBtn').onclick = async () => {
 
 async function updateOne(profile, name, target) {
   const m = getOrCreateMap(profile);
-  m.set(name, { ...(m.get(name) || {}), loading: true, error: null });
+  m.set(name, { ...(m.get(name) || {}), loading: true, updating: true, error: null });
   render();
   try {
     const res = await window.pluginAPI.update(profile, name, target);
     if (res.ok) {
-      m.set(name, { loading: false, status: 'updated', from: res.from, to: res.to, error: null });
+      m.set(name, { loading: false, updating: false, status: 'updated', from: res.from, to: res.to, error: null });
       if (Array.isArray(res.profiles)) DATA = res.profiles;
     } else {
-      m.set(name, { ...(m.get(name) || {}), loading: false, status: 'failed', error: res.error || '更新失败' });
+      m.set(name, { ...(m.get(name) || {}), loading: false, updating: false, status: 'failed', error: res.error || '更新失败' });
     }
     showUpdateResult(profile, res);
   } catch (err) {
-    m.set(name, { ...(m.get(name) || {}), loading: false, status: 'failed', error: String(err.message || err) });
+    m.set(name, { ...(m.get(name) || {}), loading: false, updating: false, status: 'failed', error: String(err.message || err) });
     showReport([{ error: `${profile} · ${name}：${err.message}` }]);
   }
   render();
@@ -1537,7 +1556,7 @@ async function updateAll(profile) {
   }
   if (items.length === 0) return;
   for (const item of items) {
-    m.set(item.name, { ...m.get(item.name), loading: true, error: null });
+    m.set(item.name, { ...m.get(item.name), loading: true, updating: true, error: null });
   }
   render();
   const results = [];
@@ -1547,9 +1566,9 @@ async function updateAll(profile) {
     for (const r of report) {
       results.push(r);
       if (r.ok) {
-        m.set(r.name, { loading: false, status: 'updated', from: r.from, to: r.to, error: null });
+        m.set(r.name, { loading: false, updating: false, status: 'updated', from: r.from, to: r.to, error: null });
       } else {
-        m.set(r.name, { ...(m.get(r.name) || {}), loading: false, status: 'failed', error: r.error || '更新失败' });
+        m.set(r.name, { ...(m.get(r.name) || {}), loading: false, updating: false, status: 'failed', error: r.error || '更新失败' });
       }
     }
     if (Array.isArray(res.profiles)) DATA = res.profiles;
