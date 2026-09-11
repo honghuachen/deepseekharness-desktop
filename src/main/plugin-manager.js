@@ -25,15 +25,54 @@ const {
   parseGitHubSpec,
   parseRepoUrl,
   getInstalledGitCommit,
+  parsePnpmProgressLine,
 } = require('./plugin-guard');
 const { fetchMarketTop100 } = require('./market/market-service');
 
 let win = null; // 单例窗口
+/**
+ * 记录"下一次 restartService 如果启动失败，该怎么回滚"的单条待处理变更。
+ * 只在会触发 needsRestart 的变更（市场安装、Bundle 切换）后设置，
+ * 被下一次 restartService 调用无条件消费（无论成功与否都清空，避免残留误用于不相关的失败）。
+ * 故意不覆盖"移除插件"：移除后如果服务起不来，大概率是别的插件的问题，
+ * 自动把刚移除的插件装回去不是安全的默认行为。
+ */
+let pendingRollback = null;
+
+/** 服务因某个变更起不来时，尽力把这条变更撤销，让服务能回到变更前的可用状态 */
+async function rollbackPendingMutation(mutation, context) {
+  const dir = path.join(context.dshHome(), 'profiles', mutation.profile);
+  const nodeBin = context.getNodeBin ? await context.getNodeBin() : undefined;
+  if (mutation.kind === 'install') {
+    await removePluginsFromProfile(dir, [mutation.name], {
+      nodeBin,
+      pnpmCjs: context.pnpmCjs,
+      log: context.log,
+    });
+  } else if (mutation.kind === 'toggleBundle') {
+    await togglePluginBundle(dir, mutation.name, mutation.previousEnable);
+  }
+}
 // 进程内单例 registry checker 与 github checker，跨调用复用缓存（5 分钟 TTL）
 let registry = null;
 function getRegistry(log) {
   if (!registry) registry = createRegistryChecker({ log });
   return registry;
+}
+
+/**
+ * 包一层 log 回调：原样转发给磁盘日志，同时把能识别出的 pnpm 进度行推给渲染进程，
+ * 用于安装/更新按钮旁边的进度条。name 为 null 表示这是一次批量操作（如"更新全部"），
+ * 渲染侧据此把进度条挂在批量按钮上而不是某一行插件上。
+ */
+function makeProgressLog(baseLog, { profile, name }) {
+  return (line) => {
+    baseLog?.(line);
+    const parsed = parsePnpmProgressLine(line);
+    if (parsed && win && !win.isDestroyed()) {
+      win.webContents.send('pm:progress', { profile, name, ...parsed });
+    }
+  };
 }
 
 let githubChecker = null;
@@ -407,7 +446,7 @@ function registerIpc(context) {
           targetVersion: target,
           nodeBin,
           pnpmCjs: context.pnpmCjs,
-          log: context.log,
+          log: makeProgressLog(context.log, { profile, name }),
           registry: reg,
           githubChecker: gh,
         });
@@ -448,7 +487,7 @@ function registerIpc(context) {
       const { report } = await updatePlugins(dir, items, {
         nodeBin,
         pnpmCjs: context.pnpmCjs,
-        log: context.log,
+        log: makeProgressLog(context.log, { profile, name: null }),
         registry: reg,
         githubChecker: gh,
       });
@@ -526,6 +565,9 @@ function registerIpc(context) {
       const profileDir = path.join(home, 'profiles', profile);
       const isBundle = isBundlePackage(profileDir, name);
       const res = await togglePluginBundle(profileDir, name, enable);
+      if (isBundle) {
+        pendingRollback = { kind: 'toggleBundle', profile, name, previousEnable: !enable };
+      }
       return {
         ...res,
         profile,
@@ -539,7 +581,31 @@ function registerIpc(context) {
       if (typeof context.restartService !== 'function') {
         return { ok: false, error: 'restartService 回调未注册' };
       }
-      return await context.restartService();
+      const mutation = pendingRollback;
+      pendingRollback = null; // 无条件消费：避免残留状态误用到之后不相关的失败上
+      try {
+        return await context.restartService();
+      } catch (err) {
+        if (!mutation) throw err;
+        // 服务起不来，且知道是刚才哪个变更导致的 —— 尝试撤销该变更并把服务拉回可用状态，
+        // 而不是让用户被卡在一个每次启动都崩溃的坏状态里（对照 main.js 里内核切换失败自动回滚的做法）
+        context.log?.(`[pm] restartService 失败（${err.message}），尝试自动回滚「${mutation.name}」…`);
+        try {
+          await rollbackPendingMutation(mutation, context);
+          await context.restartService();
+          return {
+            ok: false,
+            rolledBack: true,
+            error: `插件「${mutation.name}」导致服务无法启动，已自动回滚该变更并恢复服务：${err.message}`,
+            profiles: buildInventory(context.dshHome()),
+          };
+        } catch (rollbackErr) {
+          context.log?.(`[pm] 自动回滚「${mutation.name}」后仍未恢复服务：${rollbackErr.message}`);
+          throw new Error(
+            `插件「${mutation.name}」导致服务无法启动，自动回滚后仍未恢复：${rollbackErr.message}（原始错误：${err.message}），请手动检查`,
+          );
+        }
+      }
     }
     if (cmd === 'marketInstall') {
       const { plugin, profile = 'web' } = payload ?? {};
@@ -556,13 +622,14 @@ function registerIpc(context) {
       const nodeBin = context.getNodeBin ? await context.getNodeBin() : undefined;
       const activeKernelVersion = context.getActiveKernelVersion ? context.getActiveKernelVersion() : null;
       const kernelDir = context.getKernelDir ? context.getKernelDir() : null;
+      const marketPluginName = plugin.name || plugin.packageName || plugin.displayName;
       const res = await installPluginToProfile(profileDir, plugin, {
         nodeBin,
         pnpmCjs: context.pnpmCjs,
         activeKernelVersion,
         kernelDir,
         dshHome: home,
-        log: context.log,
+        log: makeProgressLog(context.log, { profile, name: marketPluginName }),
       });
 
       if (res.ok) {
@@ -585,6 +652,7 @@ function registerIpc(context) {
         cache.profiles[profile] = profileList;
         writeUpdatesCache(home, cache);
         context.onUpdatesCacheChanged?.();
+        pendingRollback = { kind: 'install', profile, name: res.name };
       }
 
       return {
@@ -683,4 +751,5 @@ module.exports = {
   readUpdatesCache,
   writeUpdatesCache,
   getPluginUpdatesSummary,
+  rollbackPendingMutation,
 };

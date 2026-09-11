@@ -171,6 +171,29 @@ function isBundlePackage(profileDir, pkgName) {
   return true;
 }
 
+/**
+ * 解析 pnpm 安装/更新过程中打印的进度行，例如：
+ *   "Progress: resolved 175, reused 53, downloaded 8, added 10"
+ *   "Progress: resolved 175, reused 53, downloaded 8, added 10, done"
+ * pnpm 不提供总字节数/百分比，只有这几个累计计数器 —— 用 added/resolved 的比值
+ * 作为进度条的粗略近似值（resolved 是当前已知的依赖总数上界，随着解析推进还会变化，
+ * 所以只是「大致」而非精确百分比）。非该格式的行返回 null。
+ */
+function parsePnpmProgressLine(line) {
+  if (typeof line !== 'string') return null;
+  const m = line.match(
+    /Progress:\s*resolved\s+(\d+),\s*reused\s+(\d+),\s*downloaded\s+(\d+),\s*added\s+(\d+)(,\s*done)?/i,
+  );
+  if (!m) return null;
+  return {
+    resolved: Number(m[1]),
+    reused: Number(m[2]),
+    downloaded: Number(m[3]),
+    added: Number(m[4]),
+    done: Boolean(m[5]),
+  };
+}
+
 function runPnpm(nodeBin, pnpmCjs, args, cwd, onLine) {
   return new Promise((resolve, reject) => {
     const nodeDir = path.dirname(nodeBin);
@@ -473,11 +496,67 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
   const cache = new Map(); // cacheKey -> { sha, shortSha, tag, version, isRelease, expiresAt }
   const inflight = new Map(); // cacheKey -> Promise<object|null>
 
+  /**
+   * 针对 monorepo 内 `#path:` 子目录安装的插件，单独按路径查询其「最近一次真正改动」的 Commit，
+   * 并读取该 Commit 下该路径自身 package.json 的 version 字段。
+   *
+   * 背景：像 `ningbainb/deepseek-harness-desktop` 这类仓库本身也会打整仓库级别的产品发布 Tag
+   * （如 desktop-v3.3.0），若沿用第 1/2 优先级的“仓库级 Release/Tag”逻辑，会把桌面壳自身的版本号
+   * 误当成 path 里那个具体插件子包的版本，导致要么误报“有更新”（子包内容未变但壳升级了），
+   * 要么把不相关的壳版本号当作“最新版本”展示给用户。因此子目录安装一律绕开仓库级 Release/Tag，
+   * 只看该路径下真实提交历史与其自带 package.json。
+   */
+  async function fetchLatestForPath(owner, repo, ref, subPath, cacheKey, now) {
+    try {
+      const shaParam = ref && ref !== 'HEAD' ? `&sha=${encodeURIComponent(ref)}` : '';
+      const commitsUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?path=${encodeURIComponent(subPath)}${shaParam}&per_page=1`;
+      const res = await fetch(commitsUrl, {
+        headers: { 'User-Agent': 'DeepseekHarnessApp', 'Accept': 'application/vnd.github.v3+json' },
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const commit = Array.isArray(data) ? data[0] : null;
+      if (!commit || typeof commit.sha !== 'string') return null;
+      const sha = commit.sha.toLowerCase();
+
+      let version = null;
+      try {
+        const pkgUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${subPath.replace(/^\/+|\/+$/g, '')}/package.json?ref=${encodeURIComponent(sha)}`;
+        const pkgRes = await fetch(pkgUrl, {
+          headers: { 'User-Agent': 'DeepseekHarnessApp', 'Accept': 'application/vnd.github.v3+json' },
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (pkgRes.ok) {
+          const pkgData = await pkgRes.json();
+          if (pkgData && typeof pkgData.content === 'string') {
+            const pkgJson = JSON.parse(Buffer.from(pkgData.content, 'base64').toString('utf8'));
+            if (typeof pkgJson.version === 'string') version = pkgJson.version;
+          }
+        }
+      } catch {}
+
+      const result = {
+        sha,
+        shortSha: sha.slice(0, 7),
+        tag: null,
+        version,
+        isRelease: false,
+        expiresAt: now + ttlMs,
+      };
+      cache.set(cacheKey, result);
+      return result;
+    } catch (err) {
+      log(`[github-checker] 按子路径查询 ${owner}/${repo}#${subPath} 最新改动失败: ${err.message}`);
+      return null;
+    }
+  }
+
   async function fetchLatest(spec) {
     const parsed = typeof spec === 'string' ? parseGitHubSpec(spec) : spec;
     if (!parsed || !parsed.owner || !parsed.repo) return null;
-    const { owner, repo, ref = 'HEAD' } = parsed;
-    const cacheKey = `${owner.toLowerCase()}/${repo.toLowerCase()}#${ref}`;
+    const { owner, repo, ref = 'HEAD', path: subPath } = parsed;
+    const cacheKey = `${owner.toLowerCase()}/${repo.toLowerCase()}#${ref}${subPath ? `:${subPath}` : ''}`;
 
     if (inflight.has(cacheKey)) return inflight.get(cacheKey);
     const cached = cache.get(cacheKey);
@@ -485,8 +564,15 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
     if (cached && cached.expiresAt > now) return cached;
 
     const p = (async () => {
+      // monorepo 子目录安装（#path:）：不使用仓库级 Release/Tag，避免与壳/主产品版本号混淆
+      if (subPath) {
+        const result = await fetchLatestForPath(owner, repo, ref, subPath, cacheKey, now);
+        if (result) return result;
+        // 按路径查询失败时，仍兜底走下面的仓库级逻辑，保证至少能拿到一个 sha 用于对比
+      }
+
       // 第 1 优先级（GitHub Releases）：优先请求该仓库的 /releases/latest，获取最新正式发布的 Release Tag 及 Commit SHA
-      if (!ref || ref === 'HEAD') {
+      if (!subPath && (!ref || ref === 'HEAD')) {
         try {
           const relUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest`;
           const res = await fetch(relUrl, {
@@ -575,8 +661,10 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
           let targetVersion = null;
           let isRelease = false;
 
-          if (!ref || ref === 'HEAD') {
+          if ((!ref || ref === 'HEAD') && !subPath) {
             // 第 2 优先级（Git Tags）：筛选出符合语义化版本规范的最高版本 Tag
+            // 注意：仅适用于「安装整个仓库」的场景；subPath 子目录安装已在上面单独处理，
+            // 这里如果误用仓库级 Tag 会把主产品版本号当成子包版本号（见 fetchLatestForPath 的说明）
             const candidateTags = [];
             for (const [tName, tSha] of tagToSha.entries()) {
               const ver = extractVersionFromTag(tName);
@@ -797,9 +885,13 @@ async function checkProfileUpdates(profileDir, { registry, githubChecker, log = 
     }
 
     let isCurrent = false;
-    if (remote.sha && installedSha && remote.sha.toLowerCase() === installedSha.toLowerCase()) {
-      isCurrent = true;
+    if (remote.sha && installedSha) {
+      // 双方都能拿到具体 Commit SHA 时，以 SHA 是否一致为唯一准绳：
+      // 不少插件子包（尤其 monorepo #path: 安装）疏于维护 package.json 里的 version 字段，
+      // SHA 已经不同就代表远端内容确实变了，不能因为「版本号字符串碰巧相同」而误判为「已是最新」。
+      isCurrent = remote.sha.toLowerCase() === installedSha.toLowerCase();
     } else if (remote.version && installedVer) {
+      // 仅当至少一侧缺少可比较的 Commit SHA 时，才退回到用声明版本号做兜底比较
       const { compareVersions } = require('./semver');
       if (compareVersions(remote.version, installedVer) <= 0) {
         isCurrent = true;
@@ -886,8 +978,13 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
         try {
           const gh = githubChecker || createGitHubChecker({ log });
           const release = await gh.fetchLatest(ghSpec);
+          // 优先用 Tag（可读），没有 Tag（如 monorepo #path: 子目录安装、或仓库本身无版本 Tag）
+          // 就退回到具体 Commit SHA —— 不能因为没有 Tag 就放弃更新，否则「更新到 latest」
+          // 与「失败后重试」都会静默变成 no-op（重新解析回原来那个 ref，什么也没变却报成功）
           if (release && release.tag) {
             targetRef = release.tag;
+          } else if (release && release.sha) {
+            targetRef = release.sha;
           } else {
             targetRef = null;
           }
@@ -1644,5 +1741,6 @@ module.exports = {
   updatePlugin,
   updatePlugins,
   compareRangeToLatest,
+  parsePnpmProgressLine,
   CANONICAL_PKG,
 };

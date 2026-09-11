@@ -258,6 +258,18 @@
     border-radius:50%; animation: spin .7s linear infinite; vertical-align: -1px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .progress-bar {
+    display: inline-flex; align-items: center; gap: 6px; vertical-align: -3px;
+  }
+  .progress-bar .track {
+    width: 64px; height: 6px; border-radius: 3px; overflow: hidden;
+    background: rgba(128,128,128,.25);
+  }
+  .progress-bar .fill {
+    height: 100%; border-radius: 3px; background: var(--primary);
+    transition: width .25s ease;
+  }
+  .progress-bar .pct { font-size: 11px; opacity: .7; min-width: 28px; }
   .banner-update {
     display:flex; align-items:center; gap:10px; flex-wrap: wrap;
     background: rgba(229,72,77,.12); border: 1px solid rgba(229,72,77,.4);
@@ -577,7 +589,7 @@
     background: rgba(47, 158, 68, 0.14);
     border-color: rgba(47, 158, 68, 0.4);
     color: #2f9e44;
-    cursor: default;
+    cursor: pointer;
   }
   @media (prefers-color-scheme: dark) {
     .btn-install.installed {
@@ -585,9 +597,37 @@
       border-color: rgba(81, 205, 109, 0.4);
     }
   }
+  /* 已安装按钮：平时显示"✓ 已安装"（绿），悬停时换成"移除"（红），点击即走移除流程 */
+  .btn-install.installed .label-remove { display: none; }
+  .btn-install.installed:hover .label-installed { display: none; }
+  .btn-install.installed:hover .label-remove { display: inline; }
+  .btn-install.installed:hover {
+    background: rgba(229, 72, 77, .12);
+    border-color: rgba(229, 72, 77, .5);
+    color: #d6313a;
+  }
   .btn-install:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+  /* 安装中：按钮本身变成一条绿色进度条（从左到右随 pnpm resolved/added 计数推进） */
+  .btn-install.installing {
+    position: relative;
+    overflow: hidden;
+    opacity: 1;
+  }
+  .btn-install.installing .fill {
+    position: absolute; inset: 0; right: auto;
+    background: rgba(47, 158, 68, .9);
+    transition: width .25s ease;
+    z-index: 0;
+  }
+  @media (prefers-color-scheme: dark) {
+    .btn-install.installing .fill { background: rgba(81, 205, 109, .9); }
+  }
+  .btn-install.installing .label {
+    position: relative;
+    z-index: 1;
   }
 
   /* 提示 Toast */
@@ -690,6 +730,34 @@ let DATA = [];
 let RESTARTING = false; // DSH 服务重启中：期间禁用所有 Bundle 启用/停用按钮，避免并发触发重启
 const selected = new Map(); // profile -> Set(names)
 const updateState = new Map(); // profile -> Map<name, {latest, status, loading, error, from, to}>
+// 安装/更新进度：key 为 `${profile}::${name}`，批量操作（如"更新全部"）name 用 '__all__'
+// value: {resolved, reused, downloaded, added, done}
+const progressState = new Map();
+function progressKey(profile, name) { return `${profile}::${name ?? '__all__'}`; }
+function progressPercent(pg) {
+  if (!pg) return 0;
+  if (pg.done) return 100;
+  if (!pg.resolved) return 0;
+  // pnpm 不提供总字节数/百分比，只能用 added/resolved 的比值粗略估算，且封顶在 95%，
+  // 避免在真正写盘完成前就已经显示 100% 造成「卡住」的错觉
+  return Math.max(2, Math.min(95, Math.round((pg.added / pg.resolved) * 100)));
+}
+// fallbackTitle：还没收到任何进度行之前（如刚点击、pnpm 还没打印第一条 Progress:）,
+// 退回展示原来那个纯 spinner，标题文案由调用方决定（"更新中…" / "安装中…"）
+// 找不到该插件自己的进度时，退回查"批量操作"（更新全部）的共享进度——
+// 同一批 pnpm install 里的插件本来就是一起装完的，共用一条进度条是合理的
+function progressPercentFor(profile, name) {
+  const pg = progressState.get(progressKey(profile, name)) || progressState.get(progressKey(profile, null));
+  return pg ? progressPercent(pg) : 0;
+}
+function progressBarHtml(profile, name, fallbackTitle) {
+  const pg = progressState.get(progressKey(profile, name)) || progressState.get(progressKey(profile, null));
+  if (!pg) return `<span class="spinner" title="${fallbackTitle || ''}"></span>`;
+  const pct = progressPercent(pg);
+  return `<span class="progress-bar" title="resolved ${pg.resolved} / added ${pg.added}">` +
+    `<span class="track"><span class="fill" style="width:${pct}%"></span></span>` +
+    `<span class="pct">${pct}%</span></span>`;
+}
 
 // 插件市场状态
 let MARKET_PLUGINS = [];
@@ -763,7 +831,7 @@ function refsTags(item) {
 function statusTagFor(item, p) {
   const st = updateState.get(p)?.get(item.rawName || item.name);
   if (!st) return '<span class="tag unknown" title="未检查">未检查</span>';
-  if (st.updating) return '<span class="spinner" title="更新中…"></span>';
+  if (st.updating) return progressBarHtml(p, item.rawName || item.name, '更新中…');
   if (st.loading) return '<span class="spinner" title="检查中…"></span>';
   if (st.status === 'outdated') {
     return '';
@@ -786,7 +854,7 @@ function statusTagFor(item, p) {
 function updateBtnFor(item, p) {
   const st = updateState.get(p)?.get(item.rawName || item.name);
   if (!st) return '';
-  if (st.updating) return '<button class="btn-update" disabled>更新中…</button>';
+  if (st.updating) return `<button class="btn-update" disabled>更新中… ${progressBarHtml(p, item.rawName || item.name, '')}</button>`;
   if (st.loading) return '';
   if (st.status === 'outdated') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="${esc(st.targetRef || st.targetTag || st.latest || 'latest')}">更新到 ${esc(st.latest || 'latest')}</button>`;
   if (st.status === 'unknown') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">更新</button>`;
@@ -1051,6 +1119,23 @@ function selectCategory(catId) {
   filterMarketPlugins();
 }
 
+// 同步插件市场里的"已安装"状态：不管是在"第三方插件管理"Tab 里勾选移除，
+// 还是直接在市场卡片上点"移除"，都要把对应 profile 从 installedProfiles 里摘掉，
+// 否则切回市场 Tab 还会一直显示"已安装"（陈旧状态）
+function reconcileMarketAfterRemove(selections) {
+  for (const [profile, names] of Object.entries(selections)) {
+    const removedSet = new Set(names);
+    for (const mp of MARKET_PLUGINS) {
+      const key = mp.name || mp.packageName || mp.displayName;
+      if (removedSet.has(key) && Array.isArray(mp.installedProfiles)) {
+        mp.installedProfiles = mp.installedProfiles.filter((pr) => pr !== profile);
+        if (mp.isInstalled !== undefined) mp.isInstalled = mp.installedProfiles.length > 0;
+      }
+    }
+  }
+  if (CURRENT_TAB === 'market') filterMarketPlugins();
+}
+
 function filterMarketPlugins() {
   const kw = ($('#marketSearchInput')?.value || '').trim().toLowerCase();
   SEARCH_KEYWORD = kw;
@@ -1098,21 +1183,30 @@ function renderSingleCard(p) {
   let installBtnText = '一键安装';
   let installBtnClass = 'btn-install';
   let installDisabled = '';
+  let installBtnAction = `triggerInstall('${esc(installKey)}')`;
+
+  const installedLabel = '<span class="label-installed">✓ 已安装</span><span class="label-remove">移除</span>';
 
   if (isInstalling) {
-    installBtnText = '<span class="spinner"></span> 安装中…';
+    const marketPluginName = p.name || p.packageName || p.displayName;
+    const pct = progressPercentFor(targetProfile, marketPluginName);
+    installBtnText = `<span class="fill" style="width:${pct}%"></span>` +
+      `<span class="label">${pct > 0 ? pct + '% ' : ''}安装中…</span>`;
+    installBtnClass += ' installing';
     installDisabled = 'disabled';
   } else if (RESTARTING) {
     if (isInstalledInCurrent) {
-      installBtnText = '✓ 已安装';
+      installBtnText = installedLabel;
       installBtnClass += ' installed';
     } else {
       installBtnText = '服务重启中…';
     }
     installDisabled = 'disabled';
   } else if (isInstalledInCurrent) {
-    installBtnText = '✓ 已安装';
+    // 已安装：鼠标悬停时把"✓ 已安装"换成"移除"，点击走市场卡片自己的移除流程（会先弹确认）
+    installBtnText = installedLabel;
     installBtnClass += ' installed';
+    installBtnAction = `triggerRemoveFromMarket('${esc(installKey)}')`;
   }
 
   const repoBtn = p.githubUrl
@@ -1168,7 +1262,7 @@ function renderSingleCard(p) {
         <div class="card-links">
           ${repoBtn}
         </div>
-        <button class="${installBtnClass}" ${installDisabled} onclick="triggerInstall('${esc(installKey)}')">
+        <button class="${installBtnClass}" ${installDisabled} onclick="${installBtnAction}">
           ${installBtnText}
         </button>
       </div>
@@ -1300,8 +1394,16 @@ async function triggerInstall(key) {
         filterMarketPlugins();
         showToast(`插件 ${displayName} 安装成功，正在重启服务…`, 'info');
         try {
-          await window.pluginAPI.restartService();
-          showToast(`DSH 服务已重启，${displayName} 已生效运行 ✓`, 'success');
+          const restartRes = await window.pluginAPI.restartService();
+          if (restartRes && restartRes.ok === false) {
+            // 服务起不来：后端已经尝试自动回滚刚才这次安装并恢复服务，这里同步一下本地状态
+            if (Array.isArray(restartRes.profiles)) DATA = restartRes.profiles;
+            plugin.installedProfiles = (plugin.installedProfiles || []).filter((pr) => pr !== targetProfile);
+            plugin.isInstalled = false;
+            showToast(restartRes.error || `插件 ${displayName} 导致服务无法启动`, 'error');
+          } else {
+            showToast(`DSH 服务已重启，${displayName} 已生效运行 ✓`, 'success');
+          }
         } catch (restartErr) {
           showToast(`服务重启失败：${restartErr.message || restartErr}，请手动重启 APP`, 'error');
         } finally {
@@ -1324,7 +1426,52 @@ async function triggerInstall(key) {
     showToast(`安装异常：${err.message || err}`, 'error');
   } finally {
     installingSet.delete(installKey);
+    progressState.delete(progressKey(targetProfile, plugin.name || plugin.packageName || plugin.displayName));
     filterMarketPlugins();
+  }
+}
+
+async function triggerRemoveFromMarket(key) {
+  if (RESTARTING) return;
+  const plugin = MARKET_PLUGINS.find((p) => (p.id || p.name) === key || p.name === key || p.displayName === key);
+  if (!plugin) return;
+  const displayName = plugin.displayName || plugin.name;
+  const targetProfile = $('#marketTargetProfile')?.value || 'web';
+  const isInstalledInCurrent = Array.isArray(plugin.installedProfiles) && plugin.installedProfiles.includes(targetProfile);
+  if (!isInstalledInCurrent) return;
+
+  if (!window.confirm(`确定要从 profile/${targetProfile} 移除插件「${displayName}」吗？`)) return;
+
+  const pkgName = plugin.name || plugin.packageName || plugin.displayName;
+  const selections = { [targetProfile]: [pkgName] };
+
+  try {
+    const res = await window.pluginAPI.remove(selections);
+    DATA = res.profiles ?? [];
+    reconcileMarketAfterRemove(selections);
+    showReport(res.report ?? []);
+
+    if (res?.needsRestart) {
+      RESTARTING = true;
+      render();
+      filterMarketPlugins();
+      showToast(`已移除 ${displayName}，正在重启服务…`, 'info');
+      try {
+        await window.pluginAPI.restartService();
+        showToast(`DSH 服务已重启，${displayName} 移除已生效 ✓`, 'success');
+      } catch (restartErr) {
+        showToast(`服务重启失败：${restartErr.message || restartErr}，请手动重启 APP`, 'error');
+      } finally {
+        RESTARTING = false;
+        render();
+        filterMarketPlugins();
+      }
+    } else {
+      render();
+      filterMarketPlugins();
+    }
+  } catch (err) {
+    showToast(`移除 ${displayName} 失败：${err.message || err}`, 'error');
   }
 }
 
@@ -1375,8 +1522,14 @@ async function toggleBundle(profile, name, enable) {
         render(); // 禁用所有 Bundle 按钮，避免重启期间的并发切换
         showToast(`插件 ${name} 已${enable ? '启用' : '停用'}，正在重启服务…`, 'info');
         try {
-          await window.pluginAPI.restartService();
-          showToast(`DSH 服务已重启，${name} ${enable ? '启用' : '停用'}已生效 ✓`, 'success');
+          const restartRes = await window.pluginAPI.restartService();
+          if (restartRes && restartRes.ok === false) {
+            // 服务起不来：后端已经尝试自动把这次切换改回去并恢复服务，这里同步一下本地状态
+            if (Array.isArray(restartRes.profiles)) DATA = restartRes.profiles;
+            showToast(restartRes.error || `插件 ${name} 的这次切换导致服务无法启动`, 'error');
+          } else {
+            showToast(`DSH 服务已重启，${name} ${enable ? '启用' : '停用'}已生效 ✓`, 'success');
+          }
         } catch (restartErr) {
           showToast(`服务重启失败：${restartErr.message || restartErr}，请手动重启 APP`, 'error');
         } finally {
@@ -1415,6 +1568,8 @@ async function checkProfile(profile) {
           from: u.from || u.range,
           status: u.status,
           error: u.error || null,
+          targetRef: u.targetRef || null,
+          targetTag: u.targetTag || null,
         });
       }
     }
@@ -1448,6 +1603,8 @@ async function checkAllUpdates() {
           from: u.from || u.range,
           status: u.status,
           error: u.error || null,
+          targetRef: u.targetRef || null,
+          targetTag: u.targetTag || null,
         });
       }
     }
@@ -1493,6 +1650,8 @@ $('#confirmBtn').onclick = async () => {
     DATA = res.profiles ?? [];
     selected.clear();
     showReport(res.report ?? []);
+
+    reconcileMarketAfterRemove(selections);
 
     $('#removeBtn').style.display = '';
     $('#cancelBtn').style.display = 'none';
@@ -1552,6 +1711,7 @@ async function updateOne(profile, name, target) {
     m.set(name, { ...(m.get(name) || {}), loading: false, updating: false, status: 'failed', error: String(err.message || err) });
     showReport([{ error: `${profile} · ${name}：${err.message}` }]);
   }
+  progressState.delete(progressKey(profile, name));
   render();
 }
 
@@ -1597,6 +1757,7 @@ async function updateAll(profile) {
   } catch (err) {
     showReport([{ error: `${profile} · 更新全部失败：${err.message}` }]);
   }
+  progressState.delete(progressKey(profile, null));
   for (const r of results) showUpdateResult(profile, r);
   render();
 }
@@ -1648,6 +1809,8 @@ function applyUpdateCache(cache) {
           from: u.from || u.range,
           status: u.status,
           error: null,
+          targetRef: u.targetRef || null,
+          targetTag: u.targetTag || null,
         });
       }
     }
@@ -1680,6 +1843,18 @@ async function load() {
 if (window.pluginAPI?.onSwitchTab) {
   window.pluginAPI.onSwitchTab((tab) => {
     switchView(tab);
+  });
+}
+
+// 监听安装/更新进度（pnpm resolved/added 计数），驱动进度条。
+// render() 只重绘"已安装插件"Tab（#content，DATA.map(renderSection)），market 卡片是
+// 由 filterMarketPlugins()→renderMarketCards() 单独重绘的——两个都要调用，
+// 不然市场里"一键安装"的进度条永远不会画出来（数据在更，画面没动）。
+if (window.pluginAPI?.onProgress) {
+  window.pluginAPI.onProgress(({ profile, name, ...pg }) => {
+    progressState.set(progressKey(profile, name), pg);
+    render();
+    if (CURRENT_TAB === 'market') filterMarketPlugins();
   });
 }
 

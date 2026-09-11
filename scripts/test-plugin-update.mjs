@@ -33,8 +33,9 @@ const {
   installPluginToProfile,
   checkProfileUpdates,
   isOfficial,
+  parsePnpmProgressLine,
 } = guard;
-const { buildInventory } = require(path.join(__dirname, '..', 'src', 'main', 'plugin-manager.js'));
+const { buildInventory, rollbackPendingMutation } = require(path.join(__dirname, '..', 'src', 'main', 'plugin-manager.js'));
 
 let failed = 0;
 function t(name, fn) {
@@ -466,6 +467,26 @@ packages:
     assert.equal(getInstalledGitCommit(dir, 'non-existent'), null);
   });
 
+  process.stdout.write('parsePnpmProgressLine:\n');
+  await t('解析标准 Progress: 行（未完成）', () => {
+    const r = parsePnpmProgressLine('Progress: resolved 175, reused 53, downloaded 8, added 10');
+    assert.deepEqual(r, { resolved: 175, reused: 53, downloaded: 8, added: 10, done: false });
+  });
+  await t('解析末尾带 done 的 Progress: 行', () => {
+    const r = parsePnpmProgressLine('Progress: resolved 175, reused 53, downloaded 8, added 10, done');
+    assert.deepEqual(r, { resolved: 175, reused: 53, downloaded: 8, added: 10, done: true });
+  });
+  await t('前缀带 [guard] 等日志装饰也能解析', () => {
+    const r = parsePnpmProgressLine('[guard]   Progress: resolved 1, reused 0, downloaded 0, added 0');
+    assert.ok(r);
+    assert.equal(r.resolved, 1);
+  });
+  await t('非 Progress: 行返回 null', () => {
+    assert.equal(parsePnpmProgressLine('Done in 18.7s using pnpm v11.24.0'), null);
+    assert.equal(parsePnpmProgressLine(''), null);
+    assert.equal(parsePnpmProgressLine(null), null);
+  });
+
   process.stdout.write('createGitHubChecker:\n');
   await t('Smart Git HTTP 解析 HEAD sha 与 tag', async () => {
     const checker = createGitHubChecker();
@@ -601,6 +622,46 @@ packages:
     }
   });
 
+  await t('monorepo #path: 子目录安装：忽略仓库级 Release Tag（避免与壳/主产品版本混淆），按路径自身最新提交与 package.json 取值', async () => {
+    const checker = createGitHubChecker();
+    const orig = global.fetch;
+    let releaseApiHit = false;
+    let pathCommitsHit = false;
+    let pathPackageJsonHit = false;
+    global.fetch = async (url) => {
+      const u = String(url);
+      // 仓库整体挂着一个与子插件毫无关系的“桌面壳”发布 Tag，绝不能被当成子插件的版本
+      if (u.includes('releases/latest')) {
+        releaseApiHit = true;
+        return new Response(JSON.stringify({ tag_name: 'desktop-v3.3.0' }), { status: 200 });
+      }
+      if (u.includes('/commits?path=')) {
+        pathCommitsHit = true;
+        assert.match(u, /path=packages%2Fskins%2Fblue-fantasy/);
+        return new Response(JSON.stringify([{ sha: '2fb56b13e8e9b02bf8cd8275bf028e2b21e65063' }]), { status: 200 });
+      }
+      if (u.includes('/contents/packages/skins/blue-fantasy/package.json')) {
+        pathPackageJsonHit = true;
+        const body = JSON.stringify({ version: '0.1.15' });
+        return new Response(JSON.stringify({ content: Buffer.from(body, 'utf8').toString('base64') }), { status: 200 });
+      }
+      return new Response('Not Found', { status: 404 });
+    };
+    try {
+      const res = await checker.fetchLatest('github:ningbainb/deepseek-harness-desktop#path:packages/skins/blue-fantasy');
+      assert.equal(releaseApiHit, false, '子目录安装不应查询仓库级 releases/latest');
+      assert.equal(pathCommitsHit, true);
+      assert.equal(pathPackageJsonHit, true);
+      assert.equal(res.sha, '2fb56b13e8e9b02bf8cd8275bf028e2b21e65063');
+      assert.equal(res.shortSha, '2fb56b1');
+      assert.equal(res.tag, null);
+      assert.equal(res.version, '0.1.15');
+      assert.equal(res.isRelease, false);
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
   process.stdout.write('checkProfileUpdates (GitHub 依赖):\n');
   await t('commit 一致 → current (已是最新)', async () => {
     const dir = tmpProfile();
@@ -627,6 +688,50 @@ importers:
       assert.equal(out[0].status, 'current');
       assert.equal(out[0].latest, 'd6e583c');
       assert.equal(out[0].isGitHub, true);
+    } finally {
+      global.fetch = orig;
+    }
+  });
+
+  await t('commit 不一致但声明版本号碰巧相同 → 仍判定 outdated（不被未跟进的 version 字段掩盖）', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo-gh-stale-version',
+      private: true,
+      dependencies: { 'blue-fantasy': 'github:ningbainb/deepseek-harness-desktop#path:packages/skins/blue-fantasy' },
+    }, null, 2) + '\n');
+    fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), `
+importers:
+  .:
+    dependencies:
+      blue-fantasy:
+        specifier: github:ningbainb/deepseek-harness-desktop#path:packages/skins/blue-fantasy
+        version: https://codeload.github.com/ningbainb/deepseek-harness-desktop/tar.gz/22f7d953f789b448654d2c016e2643a719d687ac
+`);
+    fs.mkdirSync(path.join(dir, 'node_modules', 'blue-fantasy'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'node_modules', 'blue-fantasy', 'package.json'),
+      JSON.stringify({ name: 'blue-fantasy', version: '0.1.15' }, null, 2) + '\n',
+    );
+    const gh = createGitHubChecker();
+    const orig = global.fetch;
+    global.fetch = async (url) => {
+      const u = String(url);
+      // 远端内容其实已经变了（新 sha），但维护者没跟着改 package.json 的 version 字段
+      if (u.includes('/commits?path=')) {
+        return new Response(JSON.stringify([{ sha: '2fb56b13e8e9b02bf8cd8275bf028e2b21e65063' }]), { status: 200 });
+      }
+      if (u.includes('/contents/packages/skins/blue-fantasy/package.json')) {
+        const body = JSON.stringify({ version: '0.1.15' });
+        return new Response(JSON.stringify({ content: Buffer.from(body, 'utf8').toString('base64') }), { status: 200 });
+      }
+      return new Response('Not Found', { status: 404 });
+    };
+    try {
+      const out = await checkProfileUpdates(dir, { githubChecker: gh });
+      assert.equal(out.length, 1);
+      assert.equal(out[0].name, 'blue-fantasy');
+      assert.equal(out[0].status, 'outdated');
     } finally {
       global.fetch = orig;
     }
@@ -734,24 +839,105 @@ importers:
       process.exit(0);
     `);
 
+    const fakeGithubChecker = {
+      // 该仓库没有任何 Release/Tag，只有 HEAD commit —— 验证「无 Tag 时仍应落到具体 SHA」而非 no-op
+      fetchLatest: async () => ({
+        sha: '2222222222222222222222222222222222222222',
+        shortSha: '2222222',
+        tag: null,
+        version: null,
+        isRelease: false,
+      }),
+    };
+
     const res = await updatePlugin(dir, 'dsh-history-rewind', {
       nodeBin: fakeNode,
       pnpmCjs: fakePnpm,
       log: () => {},
+      githubChecker: fakeGithubChecker,
     });
 
     assert.equal(res.ok, true);
     assert.equal(res.from, '1111111');
     assert.equal(res.to, '2222222');
 
-    // 关键校验：package.json 必须保留原 github:... 格式，绝不能被改成 ^new2222 或 ^latest
+    // 关键校验：package.json 必须保留 github:... 协议格式（绝不能被改成 ^new2222 或 ^latest 这类 npm 语义化版本写法），
+    // 但无 Tag 时应带上解析出的具体 Commit SHA，而不是原地不变（那样等于 no-op，用户永远更新不到最新内容）
     const afterPkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
-    assert.equal(afterPkg.dependencies['dsh-history-rewind'], 'github:DDDonzy/dsh-history-rewind');
+    assert.equal(
+      afterPkg.dependencies['dsh-history-rewind'],
+      'github:DDDonzy/dsh-history-rewind#2222222222222222222222222222222222222222',
+    );
 
-    // 校验执行了 pnpm update dsh-history-rewind
+    // range 确实变了（带上了具体 SHA），走的是 pnpm install 而非原地 pnpm update
     const args = JSON.parse(fs.readFileSync(path.join(dir, 'pnpm-args.json'), 'utf8'));
-    assert.equal(args[0], 'update');
-    assert.equal(args.includes('dsh-history-rewind'), true);
+    assert.equal(args[0], 'install');
+  });
+
+  await t('target="latest" 且远端只有 Commit SHA 没有 Tag（如 monorepo #path: 安装）→ 仍能算出目标 SHA，不会退化成 no-op', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'demo-gh-latest-no-tag',
+      private: true,
+      dependencies: { 'blue-fantasy': 'github:ningbainb/deepseek-harness-desktop#desktop-v3.3.0&path:packages/skins/blue-fantasy' },
+    }, null, 2) + '\n');
+    fs.mkdirSync(path.join(dir, 'node_modules'));
+    fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), `
+importers:
+  .:
+    dependencies:
+      blue-fantasy:
+        specifier: github:ningbainb/deepseek-harness-desktop#desktop-v3.3.0&path:packages/skins/blue-fantasy
+        version: https://codeload.github.com/ningbainb/deepseek-harness-desktop/tar.gz/22f7d953f789b448654d2c016e2643a719d687ac#path:packages/skins/blue-fantasy
+`);
+    const fakeNode = process.execPath;
+    const fakePnpm = path.join(dir, 'fake-pnpm-latest-no-tag.cjs');
+    fs.writeFileSync(fakePnpm, `
+      const fs = require('fs');
+      const args = process.argv.slice(2);
+      fs.writeFileSync(${JSON.stringify(path.join(dir, 'pnpm-args.json'))}, JSON.stringify(args));
+      const newLock = \`
+importers:
+  .:
+    dependencies:
+      blue-fantasy:
+        specifier: github:ningbainb/deepseek-harness-desktop#2fb56b13e8e9b02bf8cd8275bf028e2b21e65063&path:packages/skins/blue-fantasy
+        version: https://codeload.github.com/ningbainb/deepseek-harness-desktop/tar.gz/2fb56b13e8e9b02bf8cd8275bf028e2b21e65063#path:packages/skins/blue-fantasy
+\`;
+      fs.writeFileSync(${JSON.stringify(path.join(dir, 'pnpm-lock.yaml'))}, newLock);
+      process.exit(0);
+    `);
+
+    const fakeGithubChecker = {
+      fetchLatest: async () => ({
+        sha: '2fb56b13e8e9b02bf8cd8275bf028e2b21e65063',
+        shortSha: '2fb56b1',
+        tag: null,
+        version: '0.1.15',
+        isRelease: false,
+      }),
+    };
+
+    const res = await updatePlugin(dir, 'blue-fantasy', {
+      targetVersion: 'latest',
+      nodeBin: fakeNode,
+      pnpmCjs: fakePnpm,
+      log: () => {},
+      githubChecker: fakeGithubChecker,
+    });
+
+    assert.equal(res.ok, true);
+
+    // 关键校验：package.json 里的 ref 必须被换成具体 SHA，而不是保留原 Tag 原地打转（no-op）
+    const afterPkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.equal(
+      afterPkg.dependencies['blue-fantasy'],
+      'github:ningbainb/deepseek-harness-desktop#2fb56b13e8e9b02bf8cd8275bf028e2b21e65063&path:packages/skins/blue-fantasy',
+    );
+
+    // 走的是 pkgModified=true 的 install 分支（因为 range 确实变了），而不是原地 pnpm update
+    const args = JSON.parse(fs.readFileSync(path.join(dir, 'pnpm-args.json'), 'utf8'));
+    assert.equal(args[0], 'install');
   });
 
   process.stdout.write('parseRepoUrl:\n');
@@ -987,6 +1173,20 @@ importers:
     assert.ok(statusTagMatch, '能提取 statusTagFor 函数');
     assert.ok(updateBtnMatch, '能提取 updateBtnFor 函数');
 
+    // statusTagFor/updateBtnFor 在真实页面里通过同一个 <script> 的闭包直接调用
+    // progressBarHtml（不是显式传参），所以要在 new Function 执行时把它们挂到 global 上，
+    // 这样函数体里的裸标识符查找才能命中——跟浏览器里同一份 <script> 内看到彼此的效果一致。
+    const progressKeyMatch = htmlContent.match(/function progressKey\(profile, name\) \{ ([\s\S]*?) \}/);
+    const progressPercentMatch = htmlContent.match(/function progressPercent\(pg\) \{([\s\S]*?)\n\}/);
+    const progressBarHtmlMatch = htmlContent.match(/function progressBarHtml\(profile, name, fallbackTitle\) \{([\s\S]*?)\n\}/);
+    assert.ok(progressKeyMatch, '能提取 progressKey 函数');
+    assert.ok(progressPercentMatch, '能提取 progressPercent 函数');
+    assert.ok(progressBarHtmlMatch, '能提取 progressBarHtml 函数');
+    global.progressKey = new Function('profile', 'name', progressKeyMatch[1]);
+    global.progressPercent = new Function('pg', progressPercentMatch[1]);
+    global.progressState = new Map();
+    global.progressBarHtml = new Function('profile', 'name', 'fallbackTitle', progressBarHtmlMatch[1]);
+
     const updateState = new Map();
     const esc = (s) => s;
     const statusTagFor = new Function('item', 'p', 'updateState', 'esc', statusTagMatch[1]);
@@ -1023,12 +1223,175 @@ importers:
     assert.equal(tagOutdated, '', '有新版时直接显示更新按钮，不重复显示“有新版”标签');
     assert.match(btnOutdated, /更新到 0\.2\.8/);
 
-    // 5. 更新中状态 (updating: true)
+    // 5. 更新中状态 (updating: true)，还没收到任何进度行 → 退回纯 spinner，文案不变
     m.set('dsh-pet', { loading: true, updating: true });
     const tagUpdating = statusTagFor(item, 'web', updateState, esc);
     const btnUpdating = updateBtnFor(item, 'web', updateState, esc);
     assert.match(tagUpdating, /更新中/);
     assert.match(btnUpdating, /disabled>更新中…/);
+
+    // 6. 更新中状态，且已经收到 pnpm 的 Progress: 行 → 展示真实进度条而不是纯 spinner
+    global.progressState.set(global.progressKey('web', 'dsh-pet'), { resolved: 100, reused: 10, downloaded: 5, added: 50, done: false });
+    const tagUpdatingWithProgress = statusTagFor(item, 'web', updateState, esc);
+    const btnUpdatingWithProgress = updateBtnFor(item, 'web', updateState, esc);
+    assert.match(tagUpdatingWithProgress, /progress-bar/);
+    assert.match(tagUpdatingWithProgress, /50%/);
+    assert.match(btnUpdatingWithProgress, /progress-bar/);
+    global.progressState.clear();
+
+    delete global.progressKey;
+    delete global.progressPercent;
+    delete global.progressState;
+    delete global.progressBarHtml;
+  });
+
+  await t('applyUpdateCache 必须把 targetRef/targetTag 带进 updateState，否则「更新到」按钮会退化成用短 SHA 当 git ref（GitHub 无法解析）', async () => {
+    const htmlContent = fs.readFileSync(path.join(__dirname, '../src/main/pages/plugins.html'), 'utf8');
+    const getOrCreateMapMatch = htmlContent.match(/function getOrCreateMap\(profile\) \{([\s\S]*?)\n\}/);
+    const applyUpdateCacheMatch = htmlContent.match(/function applyUpdateCache\(cache\) \{([\s\S]*?)\n\}/);
+    const updateBtnMatch = htmlContent.match(/function updateBtnFor\(item, p\) \{([\s\S]*?)\n\}/);
+    assert.ok(getOrCreateMapMatch, '能提取 getOrCreateMap 函数');
+    assert.ok(applyUpdateCacheMatch, '能提取 applyUpdateCache 函数');
+
+    const updateState = new Map();
+    const realApplyUpdateCache = new Function('updateState', 'getOrCreateMap', `
+      return function applyUpdateCache(cache) {
+        ${applyUpdateCacheMatch[1]}
+      };
+    `)(updateState, (profile) => {
+      let m = updateState.get(profile);
+      if (!m) { m = new Map(); updateState.set(profile, m); }
+      return m;
+    });
+
+    const fullSha = '2fb56b13e8e9b02bf8cd8275bf028e2b21e65063';
+    realApplyUpdateCache({
+      profiles: {
+        web: [{ name: 'blue-fantasy', latest: '2fb56b1', from: 'v0.1.15 (22f7d95)', status: 'outdated', targetRef: fullSha, targetTag: null }],
+      },
+    });
+
+    const st = updateState.get('web')?.get('blue-fantasy');
+    assert.ok(st, '缓存里的条目必须被写入 updateState');
+    assert.equal(st.targetRef, fullSha, 'applyUpdateCache 不能丢弃 targetRef 字段');
+
+    const updateBtnFor = new Function('item', 'p', 'updateState', 'esc', updateBtnMatch[1]);
+    const btn = updateBtnFor({ name: 'blue-fantasy', rawName: 'blue-fantasy', range: '...' }, 'web', updateState, (s) => s);
+    // 「更新到」按钮实际发给后端的 data-target 必须是完整 40 位 SHA，不能是展示用的 7 位短 SHA（GitHub 无法把短 SHA 解析为 ref）
+    assert.match(btn, new RegExp(`data-target="${fullSha}"`));
+  });
+
+  await t('市场"一键安装"按钮本身变成绿色进度条（progressPercentFor 驱动 .fill 宽度）', async () => {
+    const htmlContent = fs.readFileSync(path.join(__dirname, '../src/main/pages/plugins.html'), 'utf8');
+    const progressKeyMatch = htmlContent.match(/function progressKey\(profile, name\) \{ ([\s\S]*?) \}/);
+    const progressPercentMatch = htmlContent.match(/function progressPercent\(pg\) \{([\s\S]*?)\n\}/);
+    const progressPercentForMatch = htmlContent.match(/function progressPercentFor\(profile, name\) \{([\s\S]*?)\n\}/);
+    assert.ok(progressPercentForMatch, '能提取 progressPercentFor 函数');
+
+    global.progressKey = new Function('profile', 'name', progressKeyMatch[1]);
+    global.progressPercent = new Function('pg', progressPercentMatch[1]);
+    global.progressState = new Map();
+    const progressPercentFor = new Function('profile', 'name', progressPercentForMatch[1]);
+
+    // 还没收到任何进度行：0%（按钮上不显示百分比，交由调用方处理）
+    assert.equal(progressPercentFor('web', 'dsh-token-pet'), 0);
+
+    global.progressState.set(global.progressKey('web', 'dsh-token-pet'), { resolved: 177, reused: 52, downloaded: 1, added: 88, done: false });
+    assert.equal(progressPercentFor('web', 'dsh-token-pet'), 50);
+
+    global.progressState.set(global.progressKey('web', 'dsh-token-pet'), { resolved: 177, reused: 52, downloaded: 1, added: 177, done: true });
+    assert.equal(progressPercentFor('web', 'dsh-token-pet'), 100);
+
+    delete global.progressKey;
+    delete global.progressPercent;
+    delete global.progressState;
+  });
+
+  await t('市场卡片：已安装的插件按钮走 triggerRemoveFromMarket，未安装的走 triggerInstall', async () => {
+    const htmlContent = fs.readFileSync(path.join(__dirname, '../src/main/pages/plugins.html'), 'utf8');
+    const renderSingleCardMatch = htmlContent.match(/function renderSingleCard\(p\) \{([\s\S]*?)\n\}/);
+    assert.ok(renderSingleCardMatch, '能提取 renderSingleCard 函数');
+
+    global.installingSet = new Set();
+    global.$ = (sel) => (sel === '#marketTargetProfile' ? { value: 'web' } : null);
+    global.esc = (s) => s;
+    global.progressPercentFor = () => 0;
+    global.RESTARTING = false;
+    global.formatStars = (n) => String(n || 0);
+    const renderSingleCard = new Function('p', renderSingleCardMatch[1]);
+
+    const base = { id: 'jimmy/dsh-token-pet', name: 'dsh-token-pet', displayName: 'dsh-token-pet', category: 'fun', categoryLabel: '趣味娱乐', description: 'desc', stars: 55 };
+
+    const notInstalled = renderSingleCard({ ...base, installedProfiles: [] });
+    assert.match(notInstalled, /onclick="triggerInstall\('jimmy\/dsh-token-pet'\)"/);
+    assert.doesNotMatch(notInstalled, /label-remove/);
+
+    const installed = renderSingleCard({ ...base, installedProfiles: ['web'] });
+    assert.match(installed, /class="btn-install installed"/);
+    assert.match(installed, /onclick="triggerRemoveFromMarket\('jimmy\/dsh-token-pet'\)"/);
+    assert.match(installed, /label-installed/);
+    assert.match(installed, /label-remove/);
+
+    delete global.installingSet;
+    delete global.$;
+    delete global.esc;
+    delete global.progressPercentFor;
+    delete global.RESTARTING;
+    delete global.formatStars;
+  });
+
+  process.stdout.write('rollbackPendingMutation（服务起不来时自动撤销刚才那次变更）:\n');
+  await t('kind=install：把刚装上的插件从 dependencies/bundles 里撤掉', async () => {
+    const dshHome = tmpProfile();
+    const profileDir = path.join(dshHome, 'profiles', 'web');
+    fs.mkdirSync(profileDir, { recursive: true });
+    fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+      name: 'web',
+      private: true,
+      dependencies: { 'deepseek-pet': '^0.2.0' },
+      dsh: { profile: { bundles: ['deepseek-pet'] } },
+    }, null, 2) + '\n');
+    fs.mkdirSync(path.join(profileDir, 'node_modules', 'deepseek-pet'), { recursive: true });
+    fs.writeFileSync(
+      path.join(profileDir, 'node_modules', 'deepseek-pet', 'package.json'),
+      JSON.stringify({ name: 'deepseek-pet', version: '0.2.0' }, null, 2) + '\n',
+    );
+
+    await rollbackPendingMutation(
+      { kind: 'install', profile: 'web', name: 'deepseek-pet' },
+      { dshHome: () => dshHome, getNodeBin: async () => undefined, pnpmCjs: undefined, log: () => {} },
+    );
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+    assert.equal(pkg.dependencies['deepseek-pet'], undefined, '导致服务起不来的插件必须从 dependencies 里撤掉');
+    assert.ok(!pkg.dsh.profile.bundles.includes('deepseek-pet'), '也必须从 bundles 里撤掉');
+  });
+
+  await t('kind=toggleBundle：把刚切换的启用状态改回去', async () => {
+    const dshHome = tmpProfile();
+    const profileDir = path.join(dshHome, 'profiles', 'web');
+    fs.mkdirSync(profileDir, { recursive: true });
+    fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+      name: 'web',
+      private: true,
+      dependencies: { 'deepseek-pet': '^0.2.0' },
+      dsh: { profile: { bundles: ['deepseek-pet'], disabledBundles: [] } },
+    }, null, 2) + '\n');
+    fs.mkdirSync(path.join(profileDir, 'node_modules', 'deepseek-pet'), { recursive: true });
+    fs.writeFileSync(
+      path.join(profileDir, 'node_modules', 'deepseek-pet', 'package.json'),
+      JSON.stringify({ name: 'deepseek-pet', version: '0.2.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }, null, 2) + '\n',
+    );
+
+    // 模拟场景：用户刚把它从"停用"切到"启用"，结果服务起不来 → previousEnable=false，应该被改回停用
+    await rollbackPendingMutation(
+      { kind: 'toggleBundle', profile: 'web', name: 'deepseek-pet', previousEnable: false },
+      { dshHome: () => dshHome, getNodeBin: async () => undefined, pnpmCjs: undefined, log: () => {} },
+    );
+
+    const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+    assert.ok(!pkg.dsh.profile.bundles.includes('deepseek-pet'), '必须改回停用状态：不再出现在 bundles 里');
+    assert.ok(pkg.dsh.profile.disabledBundles.includes('deepseek-pet'), '必须出现在 disabledBundles 里');
   });
 
   if (failed) {

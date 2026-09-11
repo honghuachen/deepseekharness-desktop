@@ -21,4 +21,6 @@ contextBridge.exposeInMainWorld('pluginAPI', {
   toggleBundle: (profile, name, enable) => ipcRenderer.invoke('pm', 'toggleBundle', { profile, name, enable }),
   restartService: () => ipcRenderer.invoke('pm', 'restartService'),
   onSwitchTab: (cb) => ipcRenderer.on('pm:switch-tab', (_e, tab) => cb(tab)),
+  // 安装/更新进度：{ profile, name (批量操作为 null), resolved, reused, downloaded, added, done }
+  onProgress: (cb) => ipcRenderer.on('pm:progress', (_e, data) => cb(data)),
 });
