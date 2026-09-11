@@ -310,6 +310,7 @@ function registerIpc(context) {
     if (cmd === 'remove') {
       const selections = payload?.selections ?? {}; // {profileName: [names]}
       const report = [];
+      let totalRemoved = 0;
       for (const [profileName, names] of Object.entries(selections)) {
         if (!Array.isArray(names) || names.length === 0) continue;
         const dir = path.join(context.dshHome(), 'profiles', profileName);
@@ -324,14 +325,21 @@ function registerIpc(context) {
             pnpmCjs: context.pnpmCjs,
             log: context.log,
           });
-          if (r.removed?.length) invalidateUpdatesCache(context.dshHome(), profileName, r.removed);
+          if (r.removed?.length) {
+            totalRemoved += r.removed.length;
+            invalidateUpdatesCache(context.dshHome(), profileName, r.removed);
+          }
           report.push({ profile: profileName, removed: r.removed, reconciled: r.reconciled });
         } catch (err) {
           context.log?.(`[pm] 移除失败 ${profileName}: ${err.message}`);
           report.push({ profile: profileName, removed: [], error: String(err.message || err) });
         }
       }
-      return { report, profiles: buildInventory(context.dshHome()) };
+      return {
+        report,
+        needsRestart: totalRemoved > 0,
+        profiles: buildInventory(context.dshHome()),
+      };
     }
     if (cmd === 'checkUpdates') {
       // 可选：仅检查指定 profile；未传则检查所有 profile
@@ -536,15 +544,21 @@ function registerIpc(context) {
       }
 
       const nodeBin = context.getNodeBin ? await context.getNodeBin() : undefined;
+      const activeKernelVersion = context.getActiveKernelVersion ? context.getActiveKernelVersion() : null;
+      const kernelDir = context.getKernelDir ? context.getKernelDir() : null;
       const res = await installPluginToProfile(profileDir, plugin, {
         nodeBin,
         pnpmCjs: context.pnpmCjs,
+        activeKernelVersion,
+        kernelDir,
+        dshHome: home,
         log: context.log,
       });
 
       return {
         ...res,
         profile,
+        needsRestart: Boolean(res.ok),
         profiles: buildInventory(home),
       };
     }
@@ -558,6 +572,8 @@ function openPluginManager({
   dshHome,
   pnpmCjs,
   getNodeBin,
+  getActiveKernelVersion,
+  getKernelDir,
   restartService,
   onUpdatesCacheChanged,
   initialTab = 'installed',
@@ -577,6 +593,8 @@ function openPluginManager({
     dshHome: typeof dshHome === 'function' ? dshHome : () => dshHome,
     pnpmCjs,
     getNodeBin,
+    getActiveKernelVersion,
+    getKernelDir,
     restartService,
     onUpdatesCacheChanged,
     log,

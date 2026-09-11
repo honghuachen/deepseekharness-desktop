@@ -34,6 +34,8 @@ const DEFAULT_SETTINGS = {
   taskBadge: true,
   // 内核版本固定：空 = 跟随 npm latest 自动更新；非空 = 固定到具体版本号，启动时不再比较 latest
   pinnedKernelVersion: '',
+  // 已下载/安装过的内核版本历史，防止切换回低版本时重复触发已下载版本的升级提示
+  downloadedKernelVersions: [],
 };
 
 /**

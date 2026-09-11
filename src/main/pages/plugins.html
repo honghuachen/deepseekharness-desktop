@@ -861,7 +861,7 @@ function renderRow(profile, item) {
   }
 
   return `<tr>
-    <td class="chk">${removable ? `<input type="checkbox" data-profile="${esc(profile)}" data-key="${esc(key)}" ${checked} onchange="onToggle(this)">` : ''}</td>
+    <td class="chk">${removable ? `<input type="checkbox" data-profile="${esc(profile)}" data-key="${esc(key)}" ${checked} ${RESTARTING ? 'disabled' : ''} onchange="onToggle(this)">` : ''}</td>
     <td class="name">${nameHtml}</td>
     <td class="range" title="${esc(item.range)}">${esc(item.range)}</td>
     <td class="refs">${item.official ? '<span class="tag official">官方</span>' : '<span class="tag third">第三方</span>'}${refsTags(item)}${bundleActionBtn}</td>
@@ -953,7 +953,7 @@ function updateSummary() {
   let totalSel = 0;
   for (const set of selected.values()) totalSel += set.size;
   $('#summary').textContent = totalSel ? `已选择 ${totalSel} 项` : `共 ${DATA.length} 个 profile`;
-  $('#removeBtn').disabled = totalSel === 0;
+  $('#removeBtn').disabled = totalSel === 0 || RESTARTING;
 }
 
 function onToggle(el) {
@@ -1077,6 +1077,14 @@ function renderSingleCard(p) {
 
   if (isInstalling) {
     installBtnText = '<span class="spinner"></span> 安装中…';
+    installDisabled = 'disabled';
+  } else if (RESTARTING) {
+    if (isInstalledInCurrent) {
+      installBtnText = '✓ 已安装';
+      installBtnClass += ' installed';
+    } else {
+      installBtnText = '服务重启中…';
+    }
     installDisabled = 'disabled';
   } else if (isInstalledInCurrent) {
     installBtnText = '✓ 已安装';
@@ -1222,6 +1230,7 @@ function openRepo(url) {
 }
 
 async function triggerInstall(key) {
+  if (RESTARTING) return;
   const plugin = MARKET_PLUGINS.find((p) => (p.id || p.name) === key || p.name === key || p.displayName === key);
   if (!plugin) return;
   const displayName = plugin.displayName || plugin.name;
@@ -1241,13 +1250,36 @@ async function triggerInstall(key) {
   try {
     const res = await window.pluginAPI.marketInstall(plugin, targetProfile);
     if (res.ok) {
-      showToast(`插件 ${displayName} 安装成功并已激活！`, 'success');
       plugin.installedProfiles = [...new Set([...(plugin.installedProfiles || []), targetProfile])];
       plugin.isInstalled = true;
       if (Array.isArray(res.profiles)) DATA = res.profiles;
       render();
+
+      if (res.needsRestart) {
+        RESTARTING = true;
+        render();
+        filterMarketPlugins();
+        showToast(`插件 ${displayName} 安装成功，正在重启服务…`, 'info');
+        try {
+          await window.pluginAPI.restartService();
+          showToast(`DSH 服务已重启，${displayName} 已生效运行 ✓`, 'success');
+        } catch (restartErr) {
+          showToast(`服务重启失败：${restartErr.message || restartErr}，请手动重启 APP`, 'error');
+        } finally {
+          RESTARTING = false;
+          render();
+          filterMarketPlugins();
+        }
+      } else {
+        showToast(`插件 ${displayName} 安装成功并已激活！`, 'success');
+      }
     } else {
-      showToast(`安装 ${displayName} 失败：${res.error || '未知错误'}`, 'error');
+      const errMsg = res.error || '未知错误';
+      if (errMsg.includes('兼容性问题')) {
+        showToast(`安装 ${displayName} 失败（${errMsg}）`, 'error');
+      } else {
+        showToast(`安装 ${displayName} 失败：${errMsg}`, 'error');
+      }
     }
   } catch (err) {
     showToast(`安装异常：${err.message || err}`, 'error');
@@ -1388,36 +1420,77 @@ $('#checkAllBtn').onclick = checkAllUpdates;
 $('#refreshBtn').onclick = () => load();
 
 $('#removeBtn').onclick = () => {
+  if (RESTARTING) return;
   $('#removeBtn').style.display = 'none';
   $('#cancelBtn').style.display = '';
   $('#confirmBtn').style.display = '';
 };
 
 $('#cancelBtn').onclick = () => {
+  if (RESTARTING) return;
   $('#removeBtn').style.display = '';
   $('#cancelBtn').style.display = 'none';
   $('#confirmBtn').style.display = 'none';
 };
 
 $('#confirmBtn').onclick = async () => {
+  if (RESTARTING) return;
   const selections = {};
+  let totalCount = 0;
   for (const [p, set] of selected.entries()) {
-    if (set.size) selections[p] = [...set];
+    if (set.size) {
+      selections[p] = [...set];
+      totalCount += set.size;
+    }
   }
+  if (totalCount === 0) return;
+
   $('#confirmBtn').disabled = true;
+  $('#cancelBtn').disabled = true;
   try {
     const res = await window.pluginAPI.remove(selections);
     DATA = res.profiles ?? [];
     selected.clear();
     showReport(res.report ?? []);
+
+    $('#removeBtn').style.display = '';
+    $('#cancelBtn').style.display = 'none';
+    $('#confirmBtn').style.display = 'none';
+
+    if (res?.needsRestart) {
+      const removedNames = [];
+      for (const r of (res.report || [])) {
+        if (Array.isArray(r.removed)) removedNames.push(...r.removed);
+      }
+      const namesLabel =
+        removedNames.length === 1
+          ? removedNames[0]
+          : (removedNames.length ? `${removedNames.length} 个插件` : '选中插件');
+
+      RESTARTING = true;
+      render();
+      showToast(`已移除 ${namesLabel}，正在重启服务…`, 'info');
+      try {
+        await window.pluginAPI.restartService();
+        showToast(`DSH 服务已重启，${namesLabel} 移除已生效 ✓`, 'success');
+      } catch (restartErr) {
+        showToast(`服务重启失败：${restartErr.message || restartErr}，请手动重启 APP`, 'error');
+      } finally {
+        RESTARTING = false;
+        render();
+      }
+    } else {
+      render();
+    }
   } catch (err) {
     showReport([{ error: err.message }]);
-  } finally {
-    $('#confirmBtn').disabled = false;
     $('#removeBtn').style.display = '';
     $('#cancelBtn').style.display = 'none';
     $('#confirmBtn').style.display = 'none';
     render();
+  } finally {
+    $('#confirmBtn').disabled = false;
+    $('#cancelBtn').disabled = false;
   }
 };
 

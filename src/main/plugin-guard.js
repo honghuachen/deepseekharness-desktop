@@ -14,6 +14,7 @@ const fsSync = require('node:fs');
 const fsPromises = require('node:fs/promises');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const semver = require('semver');
 
 const OFFICIAL_PREFIX = '@deepseek-ai/';
 const CANONICAL_PKG = {
@@ -981,13 +982,176 @@ async function sanitizeProfile(profileDir, opts = {}) {
 }
 
 /**
+ * 校验插件与当前内核版本的兼容性（静态约束 + 动态配置预检）。
+ * @param {object} pluginPkg 插件 package.json
+ * @param {string|null} activeKernelVersion 当前激活内核版本（如 '0.1.5-rc.1'）
+ * @param {object} [opts]
+ * @param {string} [opts.kernelDir] 内核运行时目录
+ * @param {string} [opts.profileDir] profile 目录
+ * @param {string} [opts.nodeBin] Node 可执行文件
+ * @param {string} [opts.dshHome] DSH_HOME 根目录
+ * @param {Function} [opts.log] 日志函数
+ * @returns {Promise<{compatible: boolean, reason?: string}>}
+ */
+async function checkPluginKernelCompatibility(pluginPkg, activeKernelVersion, {
+  kernelDir,
+  profileDir,
+  nodeBin,
+  dshHome,
+  log = () => {},
+} = {}) {
+  const kernelVer = String(activeKernelVersion || '').trim().replace(/^v/i, '');
+  if (!kernelVer) {
+    // 未提供或未知内核版本时不进行版本阻断
+    return { compatible: true };
+  }
+
+  // 1. peerDependencies: 校验官方内核 API 依赖版本
+  const peerDeps = pluginPkg?.peerDependencies || {};
+  for (const [depName, range] of Object.entries(peerDeps)) {
+    if (typeof range !== 'string' || !range.trim()) continue;
+    // 官方 @deepseek-ai/* 相关内核 API 包与 @deepseek-ai/dsh 统一版本对齐
+    if (depName === '@deepseek-ai/dsh' || depName.startsWith('@deepseek-ai/dsh-')) {
+      let isSatisfied = false;
+      try {
+        isSatisfied = semver.satisfies(kernelVer, range, { includePrerelease: true });
+      } catch {
+        isSatisfied = true;
+      }
+      if (!isSatisfied) {
+        log(`[guard] 兼容性冲突: ${pluginPkg?.name} 要求 ${depName}@${range}，当前内核为 v${kernelVer}`);
+        return {
+          compatible: false,
+          reason: `插件要求内核 API 依赖 ${depName}@${range}，与当前内核版本 v${kernelVer} 不兼容`,
+        };
+      }
+    }
+  }
+
+  // 2. dsh.compatibility 声明
+  const dshCompat = pluginPkg?.dsh?.compatibility;
+  if (dshCompat) {
+    if (dshCompat.dshReleases && typeof dshCompat.dshReleases === 'object') {
+      const releaseStatus = dshCompat.dshReleases[kernelVer] || dshCompat.dshReleases[`v${kernelVer}`];
+      if (releaseStatus === 'incompatible' || releaseStatus === false) {
+        return {
+          compatible: false,
+          reason: `插件明确标记不支持当前内核版本 v${kernelVer}`,
+        };
+      }
+    }
+    const kernelRange = dshCompat.kernel || dshCompat.version;
+    if (typeof kernelRange === 'string' && kernelRange.trim()) {
+      let isSatisfied = false;
+      try {
+        isSatisfied = semver.satisfies(kernelVer, kernelRange, { includePrerelease: true });
+      } catch {
+        isSatisfied = true;
+      }
+      if (!isSatisfied) {
+        return {
+          compatible: false,
+          reason: `插件限定内核版本范围为 ${kernelRange}，当前内核版本 v${kernelVer} 不在兼容范围内`,
+        };
+      }
+    }
+    if (dshCompat.minVersion && typeof dshCompat.minVersion === 'string') {
+      try {
+        if (semver.lt(kernelVer, dshCompat.minVersion)) {
+          return {
+            compatible: false,
+            reason: `插件要求最低内核版本为 v${dshCompat.minVersion}，当前内核版本为 v${kernelVer}`,
+          };
+        }
+      } catch {}
+    }
+    if (dshCompat.maxVersion && typeof dshCompat.maxVersion === 'string') {
+      try {
+        if (semver.gt(kernelVer, dshCompat.maxVersion)) {
+          return {
+            compatible: false,
+            reason: `插件要求最高内核版本为 v${dshCompat.maxVersion}，当前内核版本为 v${kernelVer}`,
+          };
+        }
+      } catch {}
+    }
+  }
+
+  // 3. engines 声明
+  const dshEngine = pluginPkg?.engines?.dsh || pluginPkg?.engines?.['@deepseek-ai/dsh'];
+  if (typeof dshEngine === 'string' && dshEngine.trim()) {
+    let isSatisfied = false;
+    try {
+      isSatisfied = semver.satisfies(kernelVer, dshEngine, { includePrerelease: true });
+    } catch {
+      isSatisfied = true;
+    }
+    if (!isSatisfied) {
+      return {
+        compatible: false,
+        reason: `插件 engines 限定内核版本为 ${dshEngine}，当前内核版本为 v${kernelVer}`,
+      };
+    }
+  }
+
+  return { compatible: true };
+}
+
+/**
+ * 执行官方内核 dsh --dump-config 编排预检
+ */
+async function checkKernelDumpConfig({ kernelDir, nodeBin, profileDir, dshHome, log = () => {} }) {
+  if (!kernelDir || !nodeBin || !profileDir || !dshHome) return { compatible: true };
+  const dshBin = path.join(kernelDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+  if (!fsSync.existsSync(dshBin)) return { compatible: true };
+
+  const profileName = path.basename(profileDir);
+  return new Promise((resolve) => {
+    const child = spawn(nodeBin, [dshBin, '--profile', profileName, '--dump-config'], {
+      env: { ...process.env, DSH_HOME: dshHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += String(d); });
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch {}
+      resolve({ compatible: true });
+    }, 8000);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      log(`[guard] dump-config 预检启动失败: ${err.message}`);
+      resolve({ compatible: true });
+    });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve({ compatible: true });
+      } else {
+        const lines = stderr.split(/\r?\n/).filter(Boolean);
+        const errLine = lines.find((l) => l.includes('Error:') || l.includes('error:')) || lines[0] || '配置或补丁解析异常';
+        log(`[guard] dump-config 预检未通过 (code=${code}): ${errLine}`);
+        resolve({
+          compatible: false,
+          reason: `内核配置与补丁解析异常: ${errLine.replace(/^Error:\s*/i, '').trim()}`,
+        });
+      }
+    });
+  });
+}
+
+/**
  * 向 profile 中安装单个第三方插件。
  * 1. 验证非官方包、profileDir 存在；
  * 2. 写入 package.json dependencies 并确保加入 dsh.profile.bundles；
  * 3. 运行 pnpm install 并校验；
- * 4. 失败自动回滚 package.json。
+ * 4. 检测插件与当前激活内核的 API 与配置兼容性；
+ * 5. 失败自动回滚 package.json 与 patch 并清理已安装目录。
  */
-async function installPluginToProfile(profileDir, pluginInfo, { nodeBin, pnpmCjs, log = () => {} } = {}) {
+async function installPluginToProfile(
+  profileDir,
+  pluginInfo,
+  { nodeBin, pnpmCjs, activeKernelVersion, kernelDir, dshHome, log = () => {} } = {},
+) {
   const name = (pluginInfo?.packageName || pluginInfo?.name)?.trim();
   if (!name) throw new Error('缺少插件名称');
   if (isOfficial(name)) throw new Error(`官方包 ${name} 不允许通过此途径安装`);
@@ -1021,10 +1185,17 @@ async function installPluginToProfile(profileDir, pluginInfo, { nodeBin, pnpmCjs
     targetRange = 'latest';
   }
 
-  // 备份 package.json
+  // 备份 package.json 与 cordis.patch.yml
   const backupDir = path.join(profileDir, `.sanitized-backup-${Date.now()}`);
   await fsPromises.mkdir(backupDir, { recursive: true });
   await fsPromises.copyFile(pkgFile, path.join(backupDir, 'package.json'));
+
+  const patchFile = path.join(profileDir, 'cordis.patch.yml');
+  let hadPatchFile = false;
+  if (fsSync.existsSync(patchFile)) {
+    hadPatchFile = true;
+    await fsPromises.copyFile(patchFile, path.join(backupDir, 'cordis.patch.yml'));
+  }
 
   try {
     pkg.dependencies[name] = targetRange;
@@ -1062,6 +1233,18 @@ async function installPluginToProfile(profileDir, pluginInfo, { nodeBin, pnpmCjs
       pkg.dependencies[name] = `^${installedVer}`;
     }
 
+    // 1. 静态内核 API 兼容性检测
+    const compat = await checkPluginKernelCompatibility(installed, activeKernelVersion, {
+      kernelDir,
+      profileDir,
+      nodeBin,
+      dshHome,
+      log,
+    });
+    if (!compat.compatible) {
+      throw new Error(`由于兼容性问题安装失败：${compat.reason || '与当前内核版本不兼容'}`);
+    }
+
     // 安装成功后默认启用：根据是否具备 dsh.bundle 声明分流
     if (isBundlePackage(profileDir, name)) {
       if (!pkg.dsh.profile.bundles.includes(name)) {
@@ -1069,7 +1252,6 @@ async function installPluginToProfile(profileDir, pluginInfo, { nodeBin, pnpmCjs
       }
     } else {
       // 非 bundle 插件：绝不能在 bundles 中，挂载到 cordis.patch.yml
-      const patchFile = path.join(profileDir, 'cordis.patch.yml');
       const patchContent = fsSync.existsSync(patchFile) ? fsSync.readFileSync(patchFile, 'utf8') : '';
       const newPatchContent = appendPatchInsert(patchContent, name);
       await fsPromises.writeFile(patchFile, newPatchContent);
@@ -1078,7 +1260,21 @@ async function installPluginToProfile(profileDir, pluginInfo, { nodeBin, pnpmCjs
 
     await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
 
-    log(`[guard] 插件 ${name} (v${installedVer}) 安装成功并已默认启用`);
+    // 2. 动态编排预检：内核能否正确解析包含该插件的 profile
+    if (kernelDir && nodeBin && dshHome) {
+      const dynamicCheck = await checkKernelDumpConfig({
+        kernelDir,
+        nodeBin,
+        profileDir,
+        dshHome,
+        log,
+      });
+      if (!dynamicCheck.compatible) {
+        throw new Error(`由于兼容性问题安装失败：${dynamicCheck.reason}`);
+      }
+    }
+
+    log(`[guard] 插件 ${name} (v${installedVer}) 安装成功并通过内核兼容性检测，已默认启用`);
     return {
       ok: true,
       name,
@@ -1088,6 +1284,16 @@ async function installPluginToProfile(profileDir, pluginInfo, { nodeBin, pnpmCjs
   } catch (err) {
     log(`[guard] 安装插件 ${name} 失败: ${err.message}，正在回滚…`);
     await fsPromises.copyFile(path.join(backupDir, 'package.json'), pkgFile).catch(() => {});
+    if (hadPatchFile) {
+      await fsPromises.copyFile(path.join(backupDir, 'cordis.patch.yml'), patchFile).catch(() => {});
+    } else if (fsSync.existsSync(patchFile)) {
+      await fsPromises.unlink(patchFile).catch(() => {});
+    }
+    // 清理该插件已安装的文件目录
+    const modDir = path.join(profileDir, 'node_modules', ...name.split('/'));
+    if (fsSync.existsSync(modDir)) {
+      await fsPromises.rm(modDir, { recursive: true, force: true }).catch(() => {});
+    }
     return {
       ok: false,
       name,
@@ -1162,6 +1368,7 @@ module.exports = {
   removePluginsFromProfile,
   sanitizeProfile,
   installPluginToProfile,
+  checkPluginKernelCompatibility,
   togglePluginBundle,
   markSanitized,
   hasSanitizeMarker,

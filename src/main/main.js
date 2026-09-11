@@ -370,6 +370,7 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
     await updater.install(pinned, statusText); // install() 本身已幂等，已装过则跳过下载
     await updater.activate(pinned);
     installed = pinned;
+    recordDownloadedKernel(installed);
     await updater.prune(2, [installed]);
   } else {
     const latest = settings.autoCheckUpdates ? await updater.getLatestVersion() : null;
@@ -384,6 +385,7 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
       await updater.install(latest, statusText);
       await updater.activate(latest);
       installed = latest;
+      recordDownloadedKernel(installed);
       await updater.prune(2, [installed]);
     } else if (installed) {
       statusText(latest ? `已是最新版本 ${installed}` : `离线：使用已装版本 ${installed}`);
@@ -528,12 +530,19 @@ async function restartDshService() {
     const dshHome = resolveDshHome();
     logLine('[runner] 插件配置变更，正在重启 DSH 服务…');
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.loadURL(
-        'data:text/html;charset=utf-8,' +
-          encodeURIComponent(
-            '<body style="font:15px -apple-system,sans-serif;display:grid;place-items:center;height:100vh;margin:0;color:#666">插件配置已变更，正在重启服务…</body>',
-          ),
-      ).catch(() => {});
+      // 在当前页面上方注入平滑加载蒙层，避免直接 loadURL data: 导致页面销毁和白屏闪烁
+      mainWindow.webContents.executeJavaScript(`
+        (() => {
+          let mask = document.getElementById('__dsh_restart_mask');
+          if (!mask) {
+            mask = document.createElement('div');
+            mask.id = '__dsh_restart_mask';
+            mask.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,0.85);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#333;transition:opacity 0.2s ease;';
+            mask.innerHTML = '<div style="display:inline-block;width:34px;height:34px;border:3px solid rgba(0,102,204,0.2);border-radius:50%;border-top-color:#0066cc;animation:dsh_spin 0.8s linear infinite;margin-bottom:14px"></div><div style="font-size:15px;font-weight:500;color:#1d1d1f">插件配置已变更，正在重启服务…</div><style>@keyframes dsh_spin{to{transform:rotate(360deg)}}</style>';
+            document.body.appendChild(mask);
+          }
+        })()
+      `).catch(() => {});
     }
     await runner.stop();
     const { url } = await runner.start(activeVersion, settings.port, {
@@ -560,6 +569,8 @@ function openManager(initialTab = 'installed') {
       dshHome: resolveDshHome(),
       pnpmCjs: pnpmCjsPath(),
       getNodeBin: async () => (await resolveNode()) ?? 'node',
+      getActiveKernelVersion: () => activeVersion,
+      getKernelDir: () => (activeVersion ? paths.versionDir(activeVersion) : null),
       restartService: restartDshService,
       onUpdatesCacheChanged: () => updateMonitor?.checkNow().catch(() => {}),
       initialTab,
@@ -584,6 +595,32 @@ function getPluginsInfo() {
   return getPluginUpdatesSummary(resolveDshHome());
 }
 
+function getInstalledKernelVersions() {
+  const versions = new Set(Array.isArray(settings.downloadedKernelVersions) ? settings.downloadedKernelVersions : []);
+  try {
+    const names = fsSync.readdirSync(paths.versionsDir);
+    for (const name of names) {
+      if (name.startsWith('v')) {
+        const v = name.replace(/^v/, '');
+        if (v) versions.add(v);
+      }
+    }
+  } catch {}
+  if (activeVersion) versions.add(activeVersion);
+  return Array.from(versions);
+}
+
+function recordDownloadedKernel(version) {
+  if (!version) return;
+  if (!Array.isArray(settings.downloadedKernelVersions)) {
+    settings.downloadedKernelVersions = [];
+  }
+  if (!settings.downloadedKernelVersions.includes(version)) {
+    settings.downloadedKernelVersions.push(version);
+    saveSettings(paths, settings);
+  }
+}
+
 /** 更新窗口：内核当前激活/固定状态 + npm registry 全部已发布版本（拉取失败返回 entries: null） */
 async function getKernelInfo() {
   const versions = await fetchAllKernelVersions({ log: logLine });
@@ -592,6 +629,7 @@ async function getKernelInfo() {
     pinnedVersion: settings.pinnedKernelVersion || '',
     latestTag: versions?.latestTag || null,
     entries: versions?.entries || null,
+    installedVersions: getInstalledKernelVersions(),
   };
 }
 
@@ -610,6 +648,7 @@ async function switchKernelVersion(version, { pin, onLine } = {}) {
   try {
     await kernelSwitcher.switchKernelVersion(version, { pin, onLine });
     activeVersion = version;
+    recordDownloadedKernel(version);
     await updater.prune(2, [activeVersion, settings.pinnedKernelVersion].filter(Boolean));
     const { url } = await runner.start(activeVersion, settings.port, {
       envOverride: { DSH_HOME: dshHome },

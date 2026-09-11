@@ -114,6 +114,88 @@ async function main() {
     assert.equal(res.plugins.count, 0);
   });
 
+  await t('内核 latestTag 虽未更新，但 entries 中有更高版本（如 0.1.5-rc.1 发现 0.1.5-rc.2）→ hasUpdate=true', async () => {
+    const res = computeUpdateOverview({
+      currentShellVersion: '1.6.2',
+      shellInfo: { latestTag: '1.6.2', hasUpdate: false },
+      activeKernelVersion: '0.1.5-rc.1',
+      kernelLatestTag: '0.1.5-rc.1',
+      kernelEntries: [
+        { version: '0.1.5-rc.2', tag: 'rc', publishedAt: '2026-09-10T14:57:10Z', recommended: false },
+        { version: '0.1.5-rc.1', tag: 'rc', publishedAt: '2026-09-10T03:12:53Z', recommended: true },
+        { version: '0.1.5-alpha.2', tag: 'alpha', publishedAt: '2026-09-09T14:41:15Z', recommended: false },
+      ],
+    });
+    assert.equal(res.hasUpdate, true);
+    assert.equal(res.shell.hasUpdate, false);
+    assert.equal(res.kernel.hasUpdate, true);
+    assert.equal(res.kernel.latest, '0.1.5-rc.2');
+  });
+
+  await t('用户已激活最新版 0.1.5-rc.2 → hasUpdate=false', async () => {
+    const res = computeUpdateOverview({
+      currentShellVersion: '1.6.2',
+      shellInfo: { latestTag: '1.6.2', hasUpdate: false },
+      activeKernelVersion: '0.1.5-rc.2',
+      kernelLatestTag: '0.1.5-rc.1',
+      kernelEntries: [
+        { version: '0.1.5-rc.2', tag: 'rc', publishedAt: '2026-09-10T14:57:10Z', recommended: false },
+        { version: '0.1.5-rc.1', tag: 'rc', publishedAt: '2026-09-10T03:12:53Z', recommended: true },
+      ],
+    });
+    assert.equal(res.hasUpdate, false);
+    assert.equal(res.kernel.hasUpdate, false);
+  });
+
+  await t('正式版用户不受未推荐的预览版打扰（如 1.0.0 遇 1.1.0-alpha.1）→ hasUpdate=false', async () => {
+    const res = computeUpdateOverview({
+      currentShellVersion: '1.6.2',
+      shellInfo: { latestTag: '1.6.2', hasUpdate: false },
+      activeKernelVersion: '1.0.0',
+      kernelLatestTag: '1.0.0',
+      kernelEntries: [
+        { version: '1.1.0-alpha.1', tag: 'alpha', recommended: false },
+        { version: '1.0.0', tag: 'stable', recommended: true },
+      ],
+    });
+    assert.equal(res.hasUpdate, false);
+    assert.equal(res.kernel.hasUpdate, false);
+  });
+
+  await t('用户曾下载过最新版（0.1.5-rc.2）并切换回旧版（0.1.5-rc.1）→ hasUpdate=false（不骚扰用户）', async () => {
+    const res = computeUpdateOverview({
+      currentShellVersion: '1.6.2',
+      shellInfo: { latestTag: '1.6.2', hasUpdate: false },
+      activeKernelVersion: '0.1.5-rc.1',
+      kernelLatestTag: '0.1.5-rc.1',
+      kernelEntries: [
+        { version: '0.1.5-rc.2', tag: 'rc', publishedAt: '2026-09-10T14:57:10Z', recommended: false },
+        { version: '0.1.5-rc.1', tag: 'rc', publishedAt: '2026-09-10T03:12:53Z', recommended: true },
+      ],
+      installedKernelVersions: ['0.1.5-rc.1', '0.1.5-rc.2'],
+    });
+    assert.equal(res.hasUpdate, false);
+    assert.equal(res.kernel.hasUpdate, false);
+  });
+
+  await t('用户曾下载过 0.1.5-rc.2 并切换回 0.1.5-rc.1，但 npm 发布了全新的 0.1.5-rc.3 → hasUpdate=true', async () => {
+    const res = computeUpdateOverview({
+      currentShellVersion: '1.6.2',
+      shellInfo: { latestTag: '1.6.2', hasUpdate: false },
+      activeKernelVersion: '0.1.5-rc.1',
+      kernelLatestTag: '0.1.5-rc.1',
+      kernelEntries: [
+        { version: '0.1.5-rc.3', tag: 'rc', publishedAt: '2026-09-11T12:00:00Z', recommended: false },
+        { version: '0.1.5-rc.2', tag: 'rc', publishedAt: '2026-09-10T14:57:10Z', recommended: false },
+        { version: '0.1.5-rc.1', tag: 'rc', publishedAt: '2026-09-10T03:12:53Z', recommended: true },
+      ],
+      installedKernelVersions: ['0.1.5-rc.1', '0.1.5-rc.2'],
+    });
+    assert.equal(res.hasUpdate, true);
+    assert.equal(res.kernel.hasUpdate, true);
+    assert.equal(res.kernel.latest, '0.1.5-rc.3');
+  });
+
   process.stdout.write('createUpdateMonitor:\n');
 
   await t('checkNow 状态变化触发 onStatusChange，并发调用防抖合并', async () => {
@@ -160,6 +242,48 @@ async function main() {
     assert.equal(status.kernel.hasUpdate, false);
     assert.equal(status.plugins.hasUpdate, true);
     assert.equal(status.plugins.count, 3);
+
+    monitor.stop();
+  });
+
+  await t('getKernelInfo 包含 entries 时，createUpdateMonitor 能检测到未标记 latestTag 的新内核版本', async () => {
+    const monitor = createUpdateMonitor({
+      getShellInfo: async () => ({ currentVersion: '1.6.2', latest: { latestTag: '1.6.2', hasUpdate: false } }),
+      getKernelInfo: async () => ({
+        activeVersion: '0.1.5-rc.1',
+        latestTag: '0.1.5-rc.1',
+        entries: [
+          { version: '0.1.5-rc.2', tag: 'rc', publishedAt: '2026-09-10T14:57:10Z', recommended: false },
+          { version: '0.1.5-rc.1', tag: 'rc', publishedAt: '2026-09-10T03:12:53Z', recommended: true },
+        ],
+      }),
+    });
+
+    const status = await monitor.checkNow();
+    assert.equal(status.hasUpdate, true);
+    assert.equal(status.kernel.hasUpdate, true);
+    assert.equal(status.kernel.latest, '0.1.5-rc.2');
+
+    monitor.stop();
+  });
+
+  await t('getKernelInfo 包含 installedVersions 且已包含最新版时，createUpdateMonitor 判定无更新', async () => {
+    const monitor = createUpdateMonitor({
+      getShellInfo: async () => ({ currentVersion: '1.6.2', latest: { latestTag: '1.6.2', hasUpdate: false } }),
+      getKernelInfo: async () => ({
+        activeVersion: '0.1.5-rc.1',
+        latestTag: '0.1.5-rc.1',
+        entries: [
+          { version: '0.1.5-rc.2', tag: 'rc', publishedAt: '2026-09-10T14:57:10Z', recommended: false },
+          { version: '0.1.5-rc.1', tag: 'rc', publishedAt: '2026-09-10T03:12:53Z', recommended: true },
+        ],
+        installedVersions: ['0.1.5-rc.1', '0.1.5-rc.2'],
+      }),
+    });
+
+    const status = await monitor.checkNow();
+    assert.equal(status.hasUpdate, false);
+    assert.equal(status.kernel.hasUpdate, false);
 
     monitor.stop();
   });

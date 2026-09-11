@@ -19,7 +19,7 @@
   "scripts": {
     "start": "electron .",
     "fetch-tools": "node scripts/fetch-tools.mjs",
-    "test": "node scripts/badge-test.mjs && node scripts/plugin-guard-test.mjs && node scripts/test-plugin-update.mjs && node scripts/test-token-usage.mjs && node scripts/kernel-versions-test.mjs && node scripts/shell-update-test.mjs && node scripts/shell-auto-updater-test.mjs && node scripts/kernel-switch-test.mjs && node scripts/update-monitor-test.mjs && node scripts/preload-dom-test.mjs && node scripts/market-service-test.mjs",
+    "test": "node scripts/badge-test.mjs && node scripts/plugin-guard-test.mjs && node scripts/test-plugin-update.mjs && node scripts/test-token-usage.mjs && node scripts/kernel-versions-test.mjs && node scripts/shell-update-test.mjs && node scripts/shell-auto-updater-test.mjs && node scripts/kernel-switch-test.mjs && node scripts/update-monitor-test.mjs && node scripts/preload-dom-test.mjs && node scripts/market-service-test.mjs && node scripts/plugin-compatibility-test.mjs",
     "test:e2e": "node scripts/e2e-update-test.mjs",
     "test:plugin-update": "node scripts/test-plugin-update.mjs",
     "test:token-usage": "node scripts/test-token-usage.mjs",
@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
-    "fzstd": "^0.1.1"
+    "fzstd": "^0.1.1",
+    "semver": "^7.7.4"
   }
 }
