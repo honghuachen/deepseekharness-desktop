@@ -454,10 +454,10 @@ function registerIpc(context) {
           invalidateUpdatesCache(context.dshHome(), profile, [name]);
           context.onUpdatesCacheChanged?.();
         }
-        return { ...result, profile, profiles: buildInventory(context.dshHome()) };
+        return { ...result, profile, profiles: buildInventory(context.dshHome()), needsRestart: Boolean(result.ok && result.from !== result.to) };
       } catch (err) {
         context.log?.(`[pm] 更新失败 ${profile}/${name}: ${err.message}`);
-        return { ok: false, name, profile, error: String(err.message || err) };
+        return { ok: false, name, profile, error: String(err.message || err), needsRestart: false };
       }
     }
     if (cmd === 'updateAll') {
@@ -497,7 +497,8 @@ function registerIpc(context) {
         invalidateUpdatesCache(context.dshHome(), profile, okNames);
         context.onUpdatesCacheChanged?.();
       }
-      return { report, profile, profiles: buildInventory(context.dshHome()) };
+      const anyChanged = report.some((r) => r.ok && r.from !== r.to);
+      return { report, profile, profiles: buildInventory(context.dshHome()), needsRestart: anyChanged };
     }
     if (cmd === 'openExternal') {
       const url = payload?.url;

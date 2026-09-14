@@ -728,19 +728,25 @@
 let CURRENT_TAB = 'installed';
 let DATA = [];
 let RESTARTING = false; // DSH 服务重启中：期间禁用所有 Bundle 启用/停用按钮，避免并发触发重启
+let GLOBAL_UPDATING = false; // 正在一键全部更新中
 const selected = new Map(); // profile -> Set(names)
 const updateState = new Map(); // profile -> Map<name, {latest, status, loading, error, from, to}>
 // 安装/更新进度：key 为 `${profile}::${name}`，批量操作（如"更新全部"）name 用 '__all__'
 // value: {resolved, reused, downloaded, added, done}
 const progressState = new Map();
+const smoothProgressState = new Map();
+const activeProgressKeys = new Set();
+let progressTimer = null;
+
 function progressKey(profile, name) { return `${profile}::${name ?? '__all__'}`; }
 function progressPercent(pg) {
   if (!pg) return 0;
   if (pg.done) return 100;
   if (!pg.resolved) return 0;
-  // pnpm 不提供总字节数/百分比，只能用 added/resolved 的比值粗略估算，且封顶在 95%，
-  // 避免在真正写盘完成前就已经显示 100% 造成「卡住」的错觉
-  return Math.max(2, Math.min(95, Math.round((pg.added / pg.resolved) * 100)));
+  if (pg.added > 0) return Math.max(2, Math.min(95, Math.round((pg.added / pg.resolved) * 100)));
+  const fetched = (pg.reused || 0) + (pg.downloaded || 0);
+  if (fetched > 0) return Math.max(15, Math.min(75, Math.round(15 + Math.min(1, fetched / pg.resolved) * 60)));
+  return Math.max(5, Math.min(20, Math.round(5 + Math.min(15, Math.log2(pg.resolved + 1) * 3))));
 }
 // fallbackTitle：还没收到任何进度行之前（如刚点击、pnpm 还没打印第一条 Progress:）,
 // 退回展示原来那个纯 spinner，标题文案由调用方决定（"更新中…" / "安装中…"）
@@ -751,12 +757,66 @@ function progressPercentFor(profile, name) {
   return pg ? progressPercent(pg) : 0;
 }
 function progressBarHtml(profile, name, fallbackTitle) {
-  const pg = progressState.get(progressKey(profile, name)) || progressState.get(progressKey(profile, null));
-  if (!pg) return `<span class="spinner" title="${fallbackTitle || ''}"></span>`;
-  const pct = progressPercent(pg);
-  return `<span class="progress-bar" title="resolved ${pg.resolved} / added ${pg.added}">` +
+  const pKey = progressKey(profile, name);
+  const allKey = progressKey(profile, null);
+  const pg = progressState.get(pKey) || progressState.get(allKey);
+  const key = progressState.has(pKey) ? pKey : allKey;
+  const isTicking = typeof activeProgressKeys !== 'undefined' && (activeProgressKeys.has(pKey) || activeProgressKeys.has(allKey));
+  if (!pg && !isTicking) return `<span class="spinner" title="${fallbackTitle || ''}"></span>`;
+  const basePct = pg ? progressPercent(pg) : 8;
+  const smoothVal = typeof smoothProgressState !== 'undefined' ? smoothProgressState.get(key) : undefined;
+  const pct = Math.round(smoothVal ?? basePct);
+  const safeKey = typeof esc === 'function' ? esc(key) : key;
+  return `<span class="progress-bar" data-prog-key="${safeKey}" title="${pg ? `resolved ${pg.resolved} / added ${pg.added}` : '更新中…'}">` +
     `<span class="track"><span class="fill" style="width:${pct}%"></span></span>` +
     `<span class="pct">${pct}%</span></span>`;
+}
+
+function startProgressTicker(key) {
+  if (typeof activeProgressKeys === 'undefined') return;
+  activeProgressKeys.add(key);
+  if (!smoothProgressState.has(key) || smoothProgressState.get(key) >= 100) {
+    smoothProgressState.set(key, 8);
+  }
+  if (!progressTimer) {
+    progressTimer = setInterval(tickProgress, 120);
+  }
+}
+
+function finishProgressTicker(key) {
+  if (typeof activeProgressKeys === 'undefined') return;
+  activeProgressKeys.delete(key);
+  smoothProgressState.delete(key);
+  if (activeProgressKeys.size === 0 && progressTimer) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+}
+
+function tickProgress() {
+  if (typeof activeProgressKeys === 'undefined') return;
+  for (const key of activeProgressKeys) {
+    const pg = progressState.get(key);
+    const target = pg ? progressPercent(pg) : 25;
+    let cur = smoothProgressState.get(key) ?? 8;
+    if (cur < target) {
+      cur += Math.max(0.6, (target - cur) * 0.25);
+    } else if (cur < 92) {
+      // 持续平滑向前爬升，避免在 2% 卡顿
+      cur += 0.35;
+    }
+    cur = Math.min(95, cur);
+    smoothProgressState.set(key, cur);
+
+    const pct = Math.round(cur);
+    const els = document.querySelectorAll(`[data-prog-key="${key}"]`);
+    for (const el of els) {
+      const fill = el.querySelector('.fill');
+      const pctEl = el.querySelector('.pct');
+      if (fill) fill.style.width = `${pct}%`;
+      if (pctEl) pctEl.textContent = `${pct}%`;
+    }
+  }
 }
 
 // 插件市场状态
@@ -781,6 +841,28 @@ function showToast(msg, type = 'success') {
     t.style.transition = 'opacity 0.3s ease';
     setTimeout(() => t.remove(), 300);
   }, 3500);
+}
+
+async function restartServiceWithToast(pendingMsg, successMsg) {
+  RESTARTING = true;
+  render();
+  if (CURRENT_TAB === 'market') filterMarketPlugins();
+  showToast(pendingMsg, 'info');
+  try {
+    const restartRes = await window.pluginAPI.restartService();
+    if (restartRes && restartRes.ok === false) {
+      if (Array.isArray(restartRes.profiles)) DATA = restartRes.profiles;
+      showToast(restartRes.error || '服务重启失败', 'error');
+    } else {
+      showToast(successMsg, 'success');
+    }
+  } catch (restartErr) {
+    showToast(`服务重启失败：${restartErr.message || restartErr}，请手动重启 APP`, 'error');
+  } finally {
+    RESTARTING = false;
+    render();
+    if (CURRENT_TAB === 'market') filterMarketPlugins();
+  }
 }
 
 // 视图切换
@@ -831,7 +913,7 @@ function refsTags(item) {
 function statusTagFor(item, p) {
   const st = updateState.get(p)?.get(item.rawName || item.name);
   if (!st) return '<span class="tag unknown" title="未检查">未检查</span>';
-  if (st.updating) return progressBarHtml(p, item.rawName || item.name, '更新中…');
+  if (st.updating) return '';
   if (st.loading) return '<span class="spinner" title="检查中…"></span>';
   if (st.status === 'outdated') {
     return '';
@@ -856,9 +938,11 @@ function updateBtnFor(item, p) {
   if (!st) return '';
   if (st.updating) return `<button class="btn-update" disabled>更新中… ${progressBarHtml(p, item.rawName || item.name, '')}</button>`;
   if (st.loading) return '';
-  if (st.status === 'outdated') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="${esc(st.targetRef || st.targetTag || st.latest || 'latest')}">更新到 ${esc(st.latest || 'latest')}</button>`;
-  if (st.status === 'unknown') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">更新</button>`;
-  if (st.status === 'failed') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest">重试</button>`;
+  const isBusy = (typeof RESTARTING !== 'undefined' && RESTARTING) || (typeof GLOBAL_UPDATING !== 'undefined' && GLOBAL_UPDATING);
+  const disabledAttr = isBusy ? 'disabled' : '';
+  if (st.status === 'outdated') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="${esc(st.targetRef || st.targetTag || st.latest || 'latest')}" ${disabledAttr}>更新到 ${esc(st.latest || 'latest')}</button>`;
+  if (st.status === 'unknown') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest" ${disabledAttr}>更新</button>`;
+  if (st.status === 'failed') return `<button class="btn-update" data-act="upd-one" data-profile="${esc(p)}" data-key="${esc(item.rawName || item.name)}" data-target="latest" ${disabledAttr}>重试</button>`;
   return '';
 }
 
@@ -978,14 +1062,15 @@ function renderSection(p) {
   const rows = items.map((i) => renderRow(p.profile, i)).join('');
   const empty = items.length === 0 ? `<tr class="info"><td colspan="5" style="text-align:center;padding:16px 0">${INSTALLED_SEARCH_KEYWORD ? '未找到匹配的已安装插件' : '空 — 仅含默认结构'}</td></tr>` : '';
   const outdatedCount = profileOutdatedCount(p.profile);
+  const disabledAttr = (RESTARTING || GLOBAL_UPDATING) ? 'disabled' : '';
   const updAllBtn = outdatedCount > 0
-    ? `<button class="mini" data-act="upd-all" data-profile="${esc(p.profile)}" title="将全部 ${outdatedCount} 个第三方插件更新到最新版">更新全部（${outdatedCount}）</button>`
+    ? `<button class="mini" data-act="upd-all" data-profile="${esc(p.profile)}" ${disabledAttr} title="将全部 ${outdatedCount} 个第三方插件更新到最新版">更新全部（${outdatedCount}）</button>`
     : '';
   return `<div class="card">
     <h2>${esc(p.profile)} <span class="meta">${p.hasNodeModules ? '含 node_modules' : '无 node_modules'}${size ? ` · 已选 ${size} 项` : ''}</span>
       <span class="profile-actions">
         ${updAllBtn}
-        <button class="mini" data-act="check-one" data-profile="${esc(p.profile)}">检查此 profile</button>
+        <button class="mini" data-act="check-one" data-profile="${esc(p.profile)}" ${disabledAttr}>检查此 profile</button>
       </span>
     </h2>
     <table><tbody>${rows}${empty}</tbody></table>
@@ -1010,11 +1095,23 @@ function renderBanner() {
       totalOutdated += n;
     }
   }
-  if (totalOutdated === 0) return '';
+  if (totalOutdated === 0 && !GLOBAL_UPDATING) return '';
+  if (GLOBAL_UPDATING) {
+    const cur = Math.round(smoothProgressState.get('__global__') ?? 8);
+    return `<div class="banner-update">
+      <span class="strong">正在一键全部更新插件…</span>
+      <span class="profiles">分布于：${esc(outdatedProfiles.join('、') || '各 profile')}</span>
+      <span class="progress-bar" data-prog-key="__global__" style="margin-right: 6px;">
+        <span class="track" style="width: 90px;"><span class="fill" style="width:${cur}%"></span></span>
+        <span class="pct">${cur}%</span>
+      </span>
+      <button class="all-update" disabled style="opacity: 0.8; cursor: wait;">更新中…</button>
+    </div>`;
+  }
   return `<div class="banner-update">
     <span class="strong">发现 ${totalOutdated} 个插件有新版本</span>
     <span class="profiles">分布于：${esc(outdatedProfiles.join('、'))}</span>
-    <button class="all-update" onclick="updateAllGlobal()">一键全部更新</button>
+    <button class="all-update" onclick="updateAllGlobal()" ${RESTARTING ? 'disabled' : ''}>一键全部更新</button>
   </div>`;
 }
 
@@ -1045,7 +1142,7 @@ function updateSummary() {
   let totalSel = 0;
   for (const set of selected.values()) totalSel += set.size;
   $('#summary').textContent = totalSel ? `已选择 ${totalSel} 项` : `共 ${DATA.length} 个 profile`;
-  $('#removeBtn').disabled = totalSel === 0 || RESTARTING;
+  $('#removeBtn').disabled = totalSel === 0 || RESTARTING || GLOBAL_UPDATING;
 }
 
 function onToggle(el) {
@@ -1695,12 +1792,17 @@ $('#confirmBtn').onclick = async () => {
 };
 
 async function updateOne(profile, name, target) {
+  if (RESTARTING || GLOBAL_UPDATING) return;
   const m = getOrCreateMap(profile);
   m.set(name, { ...(m.get(name) || {}), loading: true, updating: true, error: null });
+  const key = progressKey(profile, name);
+  startProgressTicker(key);
   render();
+  let updated = false;
   try {
     const res = await window.pluginAPI.update(profile, name, target);
     if (res.ok) {
+      if (res.from !== res.to) updated = true;
       m.set(name, { loading: false, updating: false, status: 'updated', from: res.from, to: res.to, error: null });
       if (Array.isArray(res.profiles)) DATA = res.profiles;
     } else {
@@ -1710,12 +1812,22 @@ async function updateOne(profile, name, target) {
   } catch (err) {
     m.set(name, { ...(m.get(name) || {}), loading: false, updating: false, status: 'failed', error: String(err.message || err) });
     showReport([{ error: `${profile} · ${name}：${err.message}` }]);
+  } finally {
+    finishProgressTicker(key);
+    progressState.delete(key);
   }
-  progressState.delete(progressKey(profile, name));
   render();
+
+  if (updated) {
+    await restartServiceWithToast(
+      `插件 ${name} 更新完成，正在重启服务…`,
+      `DSH 服务已重启，${name} 更新已生效 ✓`
+    );
+  }
 }
 
 async function updateAllGlobal() {
+  if (GLOBAL_UPDATING || RESTARTING) return;
   const profiles = [];
   for (const [p, m] of updateState) {
     let n = 0;
@@ -1723,31 +1835,56 @@ async function updateAllGlobal() {
     if (n) profiles.push(p);
   }
   if (profiles.length === 0) return;
-  const btn = document.querySelector('.banner-update .all-update');
-  if (btn) btn.disabled = true;
-  for (const p of profiles) await updateAll(p);
-  if (btn) btn.disabled = false;
+
+  GLOBAL_UPDATING = true;
+  startProgressTicker('__global__');
   render();
+
+  let totalUpdated = 0;
+  try {
+    for (const p of profiles) {
+      const count = await updateAll(p, { skipRestart: true });
+      totalUpdated += (count || 0);
+    }
+  } finally {
+    GLOBAL_UPDATING = false;
+    finishProgressTicker('__global__');
+  }
+
+  render();
+
+  // 一键全部更新需要等所有插件更新完成后才能重启服务
+  if (totalUpdated > 0) {
+    await restartServiceWithToast(
+      '全部插件更新完成，正在重启服务…',
+      'DSH 服务已重启，全部插件更新已生效 ✓'
+    );
+  }
 }
 
-async function updateAll(profile) {
+async function updateAll(profile, { skipRestart = false } = {}) {
+  if (RESTARTING) return 0;
   const m = getOrCreateMap(profile);
   const items = [];
   for (const [k, s] of m) {
     if (s.status === 'outdated') items.push({ name: k, target: s.targetRef || s.targetTag || s.latest || 'latest' });
   }
-  if (items.length === 0) return;
+  if (items.length === 0) return 0;
   for (const item of items) {
     m.set(item.name, { ...m.get(item.name), loading: true, updating: true, error: null });
   }
+  const allKey = progressKey(profile, null);
+  startProgressTicker(allKey);
   render();
   const results = [];
+  let updatedCount = 0;
   try {
     const res = await window.pluginAPI.updateAll(profile, items);
     const report = res.report ?? [];
     for (const r of report) {
       results.push(r);
       if (r.ok) {
+        if (r.from !== r.to) updatedCount++;
         m.set(r.name, { loading: false, updating: false, status: 'updated', from: r.from, to: r.to, error: null });
       } else {
         m.set(r.name, { ...(m.get(r.name) || {}), loading: false, updating: false, status: 'failed', error: r.error || '更新失败' });
@@ -1756,10 +1893,20 @@ async function updateAll(profile) {
     if (Array.isArray(res.profiles)) DATA = res.profiles;
   } catch (err) {
     showReport([{ error: `${profile} · 更新全部失败：${err.message}` }]);
+  } finally {
+    finishProgressTicker(allKey);
+    progressState.delete(allKey);
   }
-  progressState.delete(progressKey(profile, null));
   for (const r of results) showUpdateResult(profile, r);
   render();
+
+  if (!skipRestart && updatedCount > 0) {
+    await restartServiceWithToast(
+      `${profile} 插件更新完成，正在重启服务…`,
+      `DSH 服务已重启，${profile} 插件更新已生效 ✓`
+    );
+  }
+  return updatedCount;
 }
 
 function showUpdateResult(profile, res) {
@@ -1852,7 +1999,22 @@ if (window.pluginAPI?.onSwitchTab) {
 // 不然市场里"一键安装"的进度条永远不会画出来（数据在更，画面没动）。
 if (window.pluginAPI?.onProgress) {
   window.pluginAPI.onProgress(({ profile, name, ...pg }) => {
-    progressState.set(progressKey(profile, name), pg);
+    const key = progressKey(profile, name);
+    progressState.set(key, pg);
+    startProgressTicker(key);
+    if (GLOBAL_UPDATING) {
+      startProgressTicker('__global__');
+    }
+    if (pg.done) {
+      smoothProgressState.set(key, 100);
+      const els = document.querySelectorAll(`[data-prog-key="${key}"]`);
+      for (const el of els) {
+        const fill = el.querySelector('.fill');
+        const pctEl = el.querySelector('.pct');
+        if (fill) fill.style.width = '100%';
+        if (pctEl) pctEl.textContent = '100%';
+      }
+    }
     render();
     if (CURRENT_TAB === 'market') filterMarketPlugins();
   });

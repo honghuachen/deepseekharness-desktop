@@ -1223,20 +1223,20 @@ importers:
     assert.equal(tagOutdated, '', '有新版时直接显示更新按钮，不重复显示“有新版”标签');
     assert.match(btnOutdated, /更新到 0\.2\.8/);
 
-    // 5. 更新中状态 (updating: true)，还没收到任何进度行 → 退回纯 spinner，文案不变
+    // 5. 更新中状态 (updating: true) → 进度条直接在更新按钮内部展示，避免并列两个进度条显示重复
     m.set('dsh-pet', { loading: true, updating: true });
     const tagUpdating = statusTagFor(item, 'web', updateState, esc);
     const btnUpdating = updateBtnFor(item, 'web', updateState, esc);
-    assert.match(tagUpdating, /更新中/);
+    assert.equal(tagUpdating, '', '更新中状态下已有按钮展示进度，不重复展示标签或并列进度条');
     assert.match(btnUpdating, /disabled>更新中…/);
 
-    // 6. 更新中状态，且已经收到 pnpm 的 Progress: 行 → 展示真实进度条而不是纯 spinner
+    // 6. 更新中状态，且已经收到 pnpm 的 Progress: 行 → 按钮内部展示真实进度条
     global.progressState.set(global.progressKey('web', 'dsh-pet'), { resolved: 100, reused: 10, downloaded: 5, added: 50, done: false });
     const tagUpdatingWithProgress = statusTagFor(item, 'web', updateState, esc);
     const btnUpdatingWithProgress = updateBtnFor(item, 'web', updateState, esc);
-    assert.match(tagUpdatingWithProgress, /progress-bar/);
-    assert.match(tagUpdatingWithProgress, /50%/);
+    assert.equal(tagUpdatingWithProgress, '', '更新中状态下外部标签保持为空，避免并列重复');
     assert.match(btnUpdatingWithProgress, /progress-bar/);
+    assert.match(btnUpdatingWithProgress, /50%/);
     global.progressState.clear();
 
     delete global.progressKey;
@@ -1392,6 +1392,44 @@ importers:
     const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
     assert.ok(!pkg.dsh.profile.bundles.includes('deepseek-pet'), '必须改回停用状态：不再出现在 bundles 里');
     assert.ok(pkg.dsh.profile.disabledBundles.includes('deepseek-pet'), '必须出现在 disabledBundles 里');
+  });
+
+  process.stdout.write('一键全部更新与多阶段进度条算法:\n');
+  await t('progressPercent 多阶段平滑计算：不再长时间卡在 2%', async () => {
+    const htmlContent = fs.readFileSync(path.join(__dirname, '../src/main/pages/plugins.html'), 'utf8');
+    const progressPercentMatch = htmlContent.match(/function progressPercent\(pg\) \{([\s\S]*?)\n\}/);
+    assert.ok(progressPercentMatch, '提取 progressPercent 函数');
+    const fn = new Function('pg', progressPercentMatch[1]);
+
+    // 1. 未解析 / 无数据
+    assert.equal(fn(null), 0);
+    assert.equal(fn({ resolved: 0 }), 0);
+
+    // 2. 刚开始解析依赖树（added=0, reused=0, downloaded=0）
+    const r1 = fn({ resolved: 1, reused: 0, downloaded: 0, added: 0, done: false });
+    assert.ok(r1 >= 5 && r1 <= 15, `初始解析进度应在 5%~15% 之间，实际 ${r1}%`);
+
+    // 3. 网络拉取/复用阶段（reused + downloaded > 0，但 added 仍为 0）
+    // 旧公式为 0/50 = 0% -> 2%，新公式应平滑上升到 15%~75%
+    const r2 = fn({ resolved: 50, reused: 25, downloaded: 0, added: 0, done: false });
+    assert.ok(r2 >= 40 && r2 <= 50, `拉取一半依赖进度应在 40%~50% 之间，实际 ${r2}%`);
+
+    const r3 = fn({ resolved: 50, reused: 50, downloaded: 0, added: 0, done: false });
+    assert.ok(r3 >= 70 && r3 <= 75, `拉取完毕等待写盘进度应在 70%~75% 之间，实际 ${r3}%`);
+
+    // 4. 写盘阶段（added > 0）
+    const r4 = fn({ resolved: 100, reused: 10, downloaded: 5, added: 50, done: false });
+    assert.equal(r4, 50, `已写盘一半应为 50%，实际 ${r4}%`);
+
+    // 5. 完成
+    const r5 = fn({ resolved: 100, reused: 90, downloaded: 10, added: 100, done: true });
+    assert.equal(r5, 100, `done 状态应为 100%`);
+  });
+
+  await t('updateAllGlobal 须等全部插件更新完毕后才执行唯一定时重启', async () => {
+    const htmlContent = fs.readFileSync(path.join(__dirname, '../src/main/pages/plugins.html'), 'utf8');
+    assert.match(htmlContent, /skipRestart:\s*true/, 'updateAllGlobal 遍历每个 profile 时必须带 skipRestart: true，防止中间过程重启');
+    assert.match(htmlContent, /restartServiceWithToast/, '所有插件更新完成后统一调用重启');
   });
 
   if (failed) {

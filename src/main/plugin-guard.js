@@ -203,7 +203,7 @@ function runPnpm(nodeBin, pnpmCjs, args, cwd, onLine) {
       env: {
         ...process.env,
         PATH: nodeDir + pathSep + (process.env.PATH || ''),
-        npm_config_loglevel: 'error',
+        npm_config_loglevel: 'info',
         CI: 'true',
         pnpm_config_dangerously_allow_all_builds: 'true',
         pnpm_config_strict_dep_builds: 'false',
@@ -1092,6 +1092,7 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
         [
           'install',
           '--no-frozen-lockfile',
+          '--reporter=append-only',
           '--config.dangerously-allow-all-builds=true',
           '--config.strict-dep-builds=false',
         ],
@@ -1110,6 +1111,7 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
         [
           'update',
           ...ghNames,
+          '--reporter=append-only',
           '--config.dangerously-allow-all-builds=true',
           '--config.strict-dep-builds=false',
         ],
@@ -1293,6 +1295,7 @@ async function removePluginsFromProfile(profileDir, names, { nodeBin, pnpmCjs, l
       [
         'install',
         '--no-frozen-lockfile',
+        '--reporter=append-only',
         '--config.dangerously-allow-all-builds=true',
         '--config.strict-dep-builds=false',
       ],
@@ -1574,6 +1577,7 @@ async function installPluginToProfile(
       [
         'install',
         '--no-frozen-lockfile',
+        '--reporter=append-only',
         '--config.dangerously-allow-all-builds=true',
         '--config.strict-dep-builds=false',
       ],
