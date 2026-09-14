@@ -262,12 +262,25 @@
     display: inline-flex; align-items: center; gap: 6px; vertical-align: -3px;
   }
   .progress-bar .track {
+    display: inline-block;
     width: 64px; height: 6px; border-radius: 3px; overflow: hidden;
     background: rgba(128,128,128,.25);
+    flex-shrink: 0;
   }
   .progress-bar .fill {
+    display: block;
     height: 100%; border-radius: 3px; background: var(--primary);
     transition: width .25s ease;
+  }
+  .btn-update .progress-bar .fill,
+  .banner-update .progress-bar .fill {
+    background: #e5484d;
+  }
+  @media (prefers-color-scheme: dark) {
+    .btn-update .progress-bar .fill,
+    .banner-update .progress-bar .fill {
+      background: #ff7375;
+    }
   }
   .progress-bar .pct { font-size: 11px; opacity: .7; min-width: 28px; }
   .banner-update {
