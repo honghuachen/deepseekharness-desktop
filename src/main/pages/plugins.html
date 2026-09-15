@@ -669,6 +669,58 @@
   .toast.success { border-left: 4px solid #2f9e44; }
   .toast.error { border-left: 4px solid #e5484d; }
   @keyframes slideIn { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+  /* ────────────────────────── 插件源跳转链接样式 ────────────────────────── */
+  .source-links {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+  .source-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    color: var(--text-sub);
+    text-decoration: none;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+  .source-link:hover {
+    color: var(--primary);
+    border-color: var(--primary);
+    background: var(--primary-light);
+  }
+  .source-link .source-icon {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+  }
+  .source-links-label {
+    font-size: 11px;
+    color: var(--text-sub);
+    opacity: 0.7;
+    margin-right: 2px;
+  }
+  .summary-link {
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: color 0.15s ease, opacity 0.15s ease;
+  }
+  .summary-link:hover {
+    color: var(--primary-hover);
+    opacity: 0.85;
+  }
 </style>
 </head>
 <body>
@@ -715,6 +767,17 @@
         <select id="marketTargetProfile" class="profile-select"></select>
       </div>
       <button id="marketRefreshBtn" class="mini" onclick="refreshMarketData()">刷新市场</button>
+      <div class="source-links">
+        <span class="source-links-label">插件源:</span>
+        <a class="source-link" data-url="https://deepseek1024.com" title="前往 DSH 1024Store 市场">
+          <svg class="source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          DSH 1024Store
+        </a>
+        <a class="source-link" data-url="https://github.com/dsh-market/dsh-market" title="前往 DSH Market 开源仓库">
+          <svg class="source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+          DSH Market
+        </a>
+      </div>
     </div>
 
     <!-- 分类过滤栏 -->
@@ -1149,7 +1212,7 @@ function updateInstalledCountBadge() {
 
 function updateSummary() {
   if (CURRENT_TAB === 'market') {
-    $('#summary').textContent = `共 ${MARKET_PLUGINS.length} 款社区高星插件 · 实时同步自 dsh-1024store 与 dsh-market`;
+    $('#summary').innerHTML = `共 ${MARKET_PLUGINS.length} 款社区高星插件 · 实时同步自 <a class="summary-link" data-url="https://deepseek1024.com" title="前往 DSH 1024Store 市场 (https://deepseek1024.com)">dsh-1024store</a> 与 <a class="summary-link" data-url="https://github.com/dsh-market/dsh-market" title="前往 DSH Market 开源仓库 (https://github.com/dsh-market/dsh-market)">dsh-market</a>`;
     return;
   }
   let totalSel = 0;

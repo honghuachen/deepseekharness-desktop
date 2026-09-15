@@ -12,36 +12,28 @@
  * 纯 node 实现（DI 注入目录），Electron 层只负责把计数画到 Dock 角标。
  */
 
-const fsSync = require('node:fs');
 const fsPromises = require('node:fs/promises');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
 const { SESSION_FILE_RE } = require('./token-usage/scanner');
+const { readSessionText: decompressReadSessionText } = require('./token-usage/decompress');
 
 const POLL_INTERVAL_MS = 3000;
 
-/** 解压 zstd 会话日志为文本；普通 jsonl 直接读取 */
-function readSessionText(file) {
-  if (file.endsWith('.zstd')) {
-    const p = spawn('zstd', ['-dc', file], { stdio: ['ignore', 'pipe', 'ignore'] });
-    return new Promise((resolve) => {
-      const chunks = [];
-      p.stdout.on('data', (c) => chunks.push(c));
-      p.on('error', () => resolve(''));
-      p.on('close', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    });
-  }
-  return fsPromises.readFile(file, 'utf8').catch(() => '');
+/** 读取并解压会话日志为文本（自动适配 Homebrew/系统路径及 fzstd 纯 JS 兜底） */
+async function readSessionText(file, opts) {
+  const text = await decompressReadSessionText(file, opts);
+  return text ?? '';
 }
 
 /**
  * 从一段会话文本里提取感兴趣的事件。
- * @returns {{todos: Array<{seq:number, todos:Array<{content:string,status:string}>}>, goals: Array<{seq:number, done:boolean}>}}
+ * @returns {{todos: Array<{seq:number, todos:Array<{content:string,status:string}>}>, goals: Array<{seq:number, done:boolean}>, turns: Array<{seq:number, done:boolean, turn?:number}>}}
  */
 function extractEvents(text) {
   const todos = [];
   const goals = [];
-  for (const line of text.split('\n')) {
+  const turns = [];
+  for (const line of (text || '').split('\n')) {
     let e;
     try {
       e = JSON.parse(line);
@@ -50,7 +42,17 @@ function extractEvents(text) {
     }
     const type = e.type ?? e.kind;
     const seq = typeof e.seq === 'number' ? e.seq : 0;
-    if (type === 'todo/write' && Array.isArray(e.data?.todos)) {
+    if (type === 'turn/end') {
+      const reason = e.data?.reason ?? e.reason;
+      let done = false;
+      if (typeof reason === 'string') {
+        done = /complete/i.test(reason);
+      } else if (reason && typeof reason === 'object') {
+        const flat = JSON.stringify(reason);
+        done = /"(?:kind|status|action)"\s*:\s*"(?:complete[ds]?)"/i.test(flat);
+      }
+      turns.push({ seq, done, turn: e.data?.turn });
+    } else if (type === 'todo/write' && Array.isArray(e.data?.todos)) {
       todos.push({
         seq,
         todos: e.data.todos.map((t) => ({
@@ -65,7 +67,7 @@ function extractEvents(text) {
       goals.push({ seq, done });
     }
   }
-  return { todos, goals };
+  return { todos, goals, turns };
 }
 
 function createBadgeWatcher({ sessionsDir, log = () => {}, onCount }) {
@@ -96,7 +98,7 @@ function createBadgeWatcher({ sessionsDir, log = () => {}, onCount }) {
 
     const text = await readSessionText(file);
     if (stopped) return;
-    const { todos, goals } = extractEvents(text);
+    const { todos, goals, turns } = extractEvents(text);
 
     // 首次见到该文件：
     //   启动基线阶段 → 只记录现状，历史不计数；
@@ -110,38 +112,63 @@ function createBadgeWatcher({ sessionsDir, log = () => {}, onCount }) {
           }
         }
         const maxGoalSeq = goals.reduce((m, g) => Math.max(m, g.seq), -1);
-        known.set(file, { mtimeMs: stat.mtimeMs, todoDone: doneSet, goalSeen: maxGoalSeq });
+        const maxTurnSeq = turns.reduce((m, t) => Math.max(m, t.seq), -1);
+        known.set(file, {
+          mtimeMs: stat.mtimeMs,
+          todoDone: doneSet,
+          goalSeen: maxGoalSeq,
+          turnSeen: maxTurnSeq,
+        });
         return;
       }
-      return scanIncrement(file, stat.mtimeMs, todos, goals, { todoDone: new Set(), goalSeen: -1 });
+      return scanIncrement(file, stat.mtimeMs, todos, goals, turns, {
+        todoDone: new Set(),
+        goalSeen: -1,
+        turnSeen: -1,
+      });
     }
-    return scanIncrement(file, stat.mtimeMs, todos, goals, prev);
+    return scanIncrement(file, stat.mtimeMs, todos, goals, turns, prev);
   }
 
   /** 与既有基线对比，计算新增完成数 */
-  async function scanIncrement(file, mtimeMs, todos, goals, prev) {
-    // 增量：todo 新完成数（content -> status，重复内容以最后一次为准）
+  async function scanIncrement(file, mtimeMs, todos, goals, turns, prev) {
     let delta = 0;
+    const prevGoalSeen = prev.goalSeen ?? -1;
+    const prevTurnSeen = prev.turnSeen ?? -1;
+    const prevTodoDone = prev.todoDone ?? new Set();
+
+    // 增量：todo 新完成数（content -> status，重复内容以最后一次为准）
     const latest = new Map();
     for (const t of todos) {
       for (const item of t.todos) latest.set(item.content, item.status);
     }
     for (const [content, status] of latest) {
-      if (status === 'completed' && !prev.todoDone.has(content)) delta += 1;
+      if (status === 'completed' && !prevTodoDone.has(content)) delta += 1;
     }
 
     // 增量：goal 完成（按 seq 推进水位，避免重复计数）
-    const maxGoalSeq = goals.reduce((m, g) => Math.max(m, g.seq), prev.goalSeen);
+    const maxGoalSeq = goals.reduce((m, g) => Math.max(m, g.seq), prevGoalSeen);
     for (const g of goals) {
-      if (g.done && g.seq > prev.goalSeen) delta += 1;
+      if (g.done && g.seq > prevGoalSeen) delta += 1;
+    }
+
+    // 增量：turn 完成（按 seq 推进水位，避免重复计数）
+    const maxTurnSeq = turns.reduce((m, t) => Math.max(m, t.seq), prevTurnSeen);
+    for (const t of turns) {
+      if (t.done && t.seq > prevTurnSeen) delta += 1;
     }
 
     // 更新基线状态：已完成集合取最新快照 ∪ 旧集合（防抖动）
-    const mergedDone = new Set(prev.todoDone);
+    const mergedDone = new Set(prevTodoDone);
     for (const [content, status] of latest) {
       if (status === 'completed') mergedDone.add(content);
     }
-    known.set(file, { mtimeMs, todoDone: mergedDone, goalSeen: maxGoalSeq });
+    known.set(file, {
+      mtimeMs,
+      todoDone: mergedDone,
+      goalSeen: maxGoalSeq,
+      turnSeen: maxTurnSeq,
+    });
 
     if (delta > 0) {
       log(`[badge] ${path.basename(path.dirname(file))} 新完成 ${delta} 项`);
@@ -193,7 +220,11 @@ function createBadgeWatcher({ sessionsDir, log = () => {}, onCount }) {
     if (timer) clearInterval(timer);
   }
 
-  return { start, clear, stop };
+  function getCount() {
+    return unacked;
+  }
+
+  return { start, clear, stop, getCount };
 }
 
 /** 递归列出 sessions 下所有 session 日志文件 */

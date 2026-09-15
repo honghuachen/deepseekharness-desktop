@@ -22,17 +22,21 @@ function assert(cond, msg) {
 
 // ── extractEvents 单测 ──
 {
-  const { todos, goals } = extractEvents(
+  const { todos, goals, turns } = extractEvents(
     [
       JSON.stringify({ type: 'todo/write', seq: 1, data: { todos: [{ content: 'a', status: 'completed' }] } }),
       'not json',
       JSON.stringify({ type: 'goal/change', seq: 2, data: { action: 'complete' } }),
       JSON.stringify({ type: 'goal/change', seq: 3, data: { status: 'blocked', reason: 'x' } }),
       JSON.stringify({ kind: 'todo/write', seq: 4, data: { todos: [{ content: 'b', status: 'pending' }] } }),
+      JSON.stringify({ type: 'turn/end', seq: 5, data: { turn: 1, reason: { kind: 'completed' } } }),
+      JSON.stringify({ type: 'turn/end', seq: 6, data: { turn: 2, reason: { kind: 'error' } } }),
+      JSON.stringify({ type: 'turn/end', seq: 7, data: { turn: 3, reason: 'completed' } }),
     ].join('\n'),
   );
-  assert(todos.length === 2 && goals.length === 2, 'extractEvents 识别 todo/write 与 goal/change');
+  assert(todos.length === 2 && goals.length === 2 && turns.length === 3, 'extractEvents 识别 todo/write、goal/change 与 turn/end');
   assert(goals[0].done === true && goals[1].done === false, 'goal 终态判定：complete 计、blocked 不计');
+  assert(turns[0].done === true && turns[1].done === false && turns[2].done === true, 'turn/end 终态判定：completed 计、error 不计');
 }
 
 // ── 端到端：临时 sessions 树 ──
@@ -108,6 +112,16 @@ await writeSession([
 ]);
 await wait(4500);
 assert(count === 1, `清零后新完成任务C count=1（实际 ${count}）`);
+assert(watcher.getCount() === 1, `getCount 匹配当前计数（实际 ${watcher.getCount()}）`);
+
+// 第六轮：真实交互轮次完成（turn/end）→ +1
+await writeSession([
+  { type: 'todo/write', seq: 2, data: { todos: [{ content: '任务A', status: 'completed' }, { content: '任务B', status: 'completed' }] } },
+  { type: 'todo/write', seq: 3, data: { todos: [{ content: '任务A', status: 'completed' }, { content: '任务B', status: 'completed' }, { content: '任务C', status: 'completed' }] } },
+  { type: 'turn/end', seq: 4, data: { turn: 1, reason: { kind: 'completed' } } },
+]);
+await wait(4500);
+assert(count === 2, `turn/end 完成后 count=2（实际 ${count}）`);
 
 watcher.stop();
 console.log(failed ? '\n有失败项' : '\n═══ badge 测试全部通过 ═══');

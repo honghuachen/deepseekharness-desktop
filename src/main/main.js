@@ -178,6 +178,10 @@ function applyBadge() {
   try {
     if (process.platform === 'darwin') {
       app.dock.setBadge(badgeCount > 0 ? String(badgeCount) : '');
+    } else if (process.platform === 'win32') {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.flashFrame(badgeCount > 0);
+      }
     } else if (typeof app.setBadgeCount === 'function') {
       app.setBadgeCount(Math.max(0, badgeCount));
     }
@@ -195,7 +199,11 @@ function persistBadgeState() {
 }
 
 function clearBadge() {
-  if (badgeCount === 0) return;
+  const watcherHasCount = !!(badgeWatcher && typeof badgeWatcher.getCount === 'function' && badgeWatcher.getCount() > 0);
+  if (badgeWatcher) {
+    badgeWatcher.clear();
+  }
+  if (badgeCount === 0 && !watcherHasCount) return;
   badgeCount = 0;
   persistBadgeState();
   applyBadge();
@@ -215,12 +223,16 @@ function setupTaskBadge(dshHome) {
     sessionsDir: path.join(dshHome, 'sessions'),
     log: logLine,
     onCount(c) {
-      badgeCount = c;
-      // 用户正盯着窗口时完成的新任务视为已读，不留角标
+      // 用户正盯着窗口时完成的新任务视为已读，不留角标并同步清空监听计数
       const focused = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
       if (c > 0 && focused) {
         badgeCount = 0;
+        badgeWatcher?.clear?.();
+        return;
       }
+      const prevCount = badgeCount;
+      badgeCount = c;
+      if (c === 0 && prevCount === 0) return;
       logLine(`[badge] onCount=${c} 窗口聚焦=${focused} → 计数 ${badgeCount}`);
       persistBadgeState();
       applyBadge();
@@ -730,7 +742,7 @@ function buildMenu() {
         },
         { type: 'separator' },
         {
-          label: '任务完成时显示 Dock 角标',
+          label: process.platform === 'darwin' ? '任务完成时显示 Dock 角标' : '任务完成时任务栏闪烁提醒',
           type: 'checkbox',
           checked: !!settings.taskBadge,
           click(item) {
