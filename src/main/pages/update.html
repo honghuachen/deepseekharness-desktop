@@ -112,6 +112,10 @@
   }
   .ext-link:hover { text-decoration: underline; }
   @media (prefers-color-scheme: dark) { .ext-link { color: #7e97ff; } }
+  .ver-link {
+    font-size: 11px; margin-left: 2px; text-decoration: none; opacity: .7;
+  }
+  .ver-link:hover { opacity: 1; text-decoration: underline; }
 
   /* Markdown 排版 */
   .md-heading {
@@ -178,10 +182,15 @@ let switchError = null;
 let confirmVersion = null; // 正在二次确认的版本号
 let shellUpdate = { status: 'idle', percent: 0, error: null }; // idle | downloading | downloaded
 
-let expandedVersions = new Set(); // 展开的版本，默认空（全部收缩）
+let expandedVersions = new Set(); // 展开的内核版本，默认空（全部收缩）
 let kernelChangelogs = null;
 let changelogError = null;
 let changelogLoading = false;
+
+let expandedShellVersions = new Set(); // 展开的壳应用版本
+let shellChangelogs = null;
+let shellChangelogError = null;
+let shellChangelogLoading = false;
 
 function inlineFormat(str) {
   return str
@@ -249,18 +258,108 @@ function tagFor(entry) {
   return tags.join(' ');
 }
 
+function renderShellChangelogPanel(version) {
+  if (shellChangelogLoading && !shellChangelogs) {
+    return `<div class="changelog-panel">
+      <div class="changelog-loading"><span class="spinner"></span> 正在拉取 GitHub 更新记录…</div>
+    </div>`;
+  }
+  if (shellChangelogError && !shellChangelogs) {
+    const ghRepoUrl = 'https://github.com/honghuachen/deepseekharness-desktop/releases';
+    return `<div class="changelog-panel">
+      <div class="changelog-error">
+        <span>无法获取更新记录：${esc(shellChangelogError)}</span>
+        <button class="retry" id="shellChangelogRetryBtn">重试</button>
+        <button class="retry" data-url="${esc(ghRepoUrl)}">前往 GitHub 查看</button>
+      </div>
+    </div>`;
+  }
+
+  let rel = shellChangelogs ? shellChangelogs[version] : null;
+  if (!rel && STATE.shell?.latest?.latestTag === version && STATE.shell?.latest?.body) {
+    rel = {
+      version,
+      tag: 'v' + version,
+      body: STATE.shell.latest.body,
+      htmlUrl: STATE.shell.latest.htmlUrl,
+    };
+  }
+
+  const ghUrl = rel?.htmlUrl || `https://github.com/honghuachen/deepseekharness-desktop/releases/tag/v${esc(version)}`;
+
+  if (!rel || !rel.body) {
+    return `<div class="changelog-panel">
+      <div class="changelog-empty">
+        <span>此版本暂无 GitHub Release 记录</span>
+        <a href="#" class="ext-link" data-url="${esc(ghUrl)}">前往 GitHub Releases ↗</a>
+      </div>
+    </div>`;
+  }
+
+  const formattedHtml = formatMarkdown(rel.body);
+  return `<div class="changelog-panel">
+    <div class="changelog-header">
+      <span class="changelog-title">版本更新记录</span>
+      <a href="#" class="ext-link" data-url="${esc(ghUrl)}">在 GitHub 查看原文 ↗</a>
+    </div>
+    <div class="changelog-body">${formattedHtml}</div>
+  </div>`;
+}
+
+function shellVersionItem({ version, tagHtml, autoPart = '', publishedAt, htmlUrl }) {
+  const isExpanded = expandedShellVersions.has(version);
+  const timeStr = publishedAt ? relTime(publishedAt) : '';
+  const url = htmlUrl || `https://github.com/honghuachen/deepseekharness-desktop/releases/tag/v${esc(version)}`;
+  return `<div class="version-item ${isExpanded ? 'expanded' : ''}">
+    <div class="version-header shell-version-header" data-shell-ver="${esc(version)}" title="点击${isExpanded ? '收起' : '展开'}更新记录">
+      <span class="expand-arrow">▶</span>
+      <span class="ver">v${esc(version)}</span>
+      <a href="#" class="ext-link ver-link" data-url="${esc(url)}" title="前往 GitHub 查看此版本">↗</a>
+      ${tagHtml}
+      ${timeStr ? `<span class="time">${esc(timeStr)}</span>` : ''}
+      <span class="spacer"></span>
+      <span class="actions">
+        ${autoPart}
+        <button data-url="${esc(url)}" title="前往 GitHub 查看此版本">在 GitHub 查看 ↗</button>
+      </span>
+    </div>
+    ${isExpanded ? renderShellChangelogPanel(version) : ''}
+  </div>`;
+}
+
 function renderShellCard() {
   const s = STATE.shell;
   if (!s) {
     $('#shellCard').innerHTML = `<h2>容器（壳应用）</h2><div class="row muted">加载中…</div>`;
     return;
   }
-  const cur = `<span class="ver">v${esc(s.currentVersion)}</span>`;
-  let body;
+
+  const curVer = s.currentVersion;
+  const curRel = shellChangelogs ? shellChangelogs[curVer] : null;
+  const curUrl = curRel?.htmlUrl || `https://github.com/honghuachen/deepseekharness-desktop/releases/tag/v${esc(curVer)}`;
+  const curPubTime = curRel?.publishedAt || (s.latest?.latestTag === curVer ? s.latest.publishedAt : null);
+
+  let statusHtml = '';
+  let listHtml = '';
+  let errBoxHtml = '';
+
   if (!s.latest) {
-    body = `<div class="row">当前版本 ${cur}</div>
-      <div class="error-box">无法连接 GitHub<button class="retry" id="shellRetry">点击重试</button></div>`;
+    statusHtml = `<div class="row" style="margin-bottom:8px">当前版本 <a href="#" class="ext-link" data-url="${esc(curUrl)}"><b>v${esc(curVer)} ↗</b></a></div>`;
+    listHtml = `<div class="version-list" style="max-height:none">
+      ${shellVersionItem({
+        version: curVer,
+        tagHtml: '<span class="tag alpha">当前版本</span>',
+        publishedAt: curPubTime,
+        htmlUrl: curUrl,
+      })}
+    </div>`;
+    errBoxHtml = `<div class="error-box">无法连接 GitHub 检测最新版本<button class="retry" id="shellRetry">点击重试</button></div>`;
   } else if (s.latest.hasUpdate) {
+    const latestVer = s.latest.latestTag;
+    const latestRel = shellChangelogs ? shellChangelogs[latestVer] : null;
+    const latestUrl = latestRel?.htmlUrl || s.latest.htmlUrl || `https://github.com/honghuachen/deepseekharness-desktop/releases/tag/v${esc(latestVer)}`;
+    const latestPubTime = latestRel?.publishedAt || s.latest.publishedAt;
+
     let autoPart = '';
     if (s.autoUpdateSupported) {
       if (shellUpdate.status === 'downloading') {
@@ -271,18 +370,30 @@ function renderShellCard() {
         autoPart = `<button class="primary" id="shellAutoDownload">下载更新</button>`;
       }
     }
-    let errHtml = '';
+
     if (shellUpdate.error) {
-      const errStr = String(shellUpdate.error);
+      let errStr = String(shellUpdate.error);
+      const headerIdx = errStr.indexOf('\nHeaders:');
+      if (headerIdx !== -1) {
+        errStr = errStr.slice(0, headerIdx).trim();
+      }
+      const isMissingArtifact = /latest\.ya?ml|未就绪|HttpError:\s*404/i.test(errStr);
       const isNetReset = /ERR_CONNECTION_RESET|ECONNRESET|ETIMEDOUT|timeout|ERR_CONNECTION_TIMED_OUT|ERR_NAME_NOT_RESOLVED|socket hang up/i.test(errStr);
-      const tipHtml = isNetReset
-        ? `<div class="tip" style="margin-top:6px;font-size:11px;opacity:.85;line-height:1.5">
+      let tipHtml = '';
+      if (isMissingArtifact) {
+        tipHtml = `<div class="tip" style="margin-top:6px;font-size:11px;opacity:.85;line-height:1.5">
+            <b>安装包资源提示：</b>该版本的安装包或发布索引元数据尚未上传就绪。<br>
+            • 可稍后点击「重试下载」；<br>
+            • 或点击「在 GitHub 查看」在 GitHub 确认安装包是否已发布完毕。
+          </div>`;
+      } else if (isNetReset) {
+        tipHtml = `<div class="tip" style="margin-top:6px;font-size:11px;opacity:.85;line-height:1.5">
             <b>连接受限提示：</b>国内网络访问 GitHub Release 安装包易受干扰导致连接重置。<br>
-            • 建议 1：点击上方<b>「前往下载页」</b>在浏览器中直接下载安装包覆盖安装（无需卸载，配置与数据完全保留）；<br>
+            • 建议 1：点击右侧<b>「在 GitHub 查看 ↗」</b>在浏览器中直接下载安装包覆盖安装（无需卸载，配置与数据完全保留）；<br>
             • 建议 2：开启代理软件（推荐开启 <b>TUN 虚拟网卡模式</b>）后点击「重试下载」。
-          </div>`
-        : '';
-      errHtml = `<div class="error-box">
+          </div>`;
+      }
+      errBoxHtml = `<div class="error-box">
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
           <span><b>下载失败：</b>${esc(errStr)}</span>
           <button class="retry" id="shellDownloadRetry">重试下载</button>
@@ -290,21 +401,50 @@ function renderShellCard() {
         ${tipHtml}
       </div>`;
     }
-    body = `<div class="row">当前版本 ${cur} · <span class="muted">发现新版本</span> <b>v${esc(s.latest.latestTag)}</b></div>
-      <div class="row" style="margin-top:8px">
-        ${autoPart}
-        <button id="shellDownloadPage">前往下载页</button>
-      </div>
-      ${errHtml}`;
+
+    statusHtml = `<div class="row" style="margin-bottom:8px">
+      当前版本 <a href="#" class="ext-link" data-url="${esc(curUrl)}">v${esc(curVer)} ↗</a> · <span class="muted">发现新版本</span> <a href="#" class="ext-link" data-url="${esc(latestUrl)}"><b>v${esc(latestVer)} ↗</b></a>
+    </div>`;
+
+    listHtml = `<div class="version-list" style="max-height:none">
+      ${shellVersionItem({
+        version: latestVer,
+        tagHtml: '<span class="tag recommended">最新版本</span>',
+        autoPart,
+        publishedAt: latestPubTime,
+        htmlUrl: latestUrl,
+      })}
+      ${shellVersionItem({
+        version: curVer,
+        tagHtml: '<span class="tag alpha">当前版本</span>',
+        publishedAt: curPubTime,
+        htmlUrl: curUrl,
+      })}
+    </div>`;
   } else {
-    body = `<div class="row">当前版本 ${cur} · <span class="muted">容器已是最新版本</span></div>`;
+    statusHtml = `<div class="row" style="margin-bottom:8px">
+      当前版本 <a href="#" class="ext-link" data-url="${esc(curUrl)}">v${esc(curVer)} ↗</a> · <span class="muted">容器已是最新版本</span>
+    </div>`;
+
+    listHtml = `<div class="version-list" style="max-height:none">
+      ${shellVersionItem({
+        version: curVer,
+        tagHtml: '<span class="tag stable">当前版本</span> <span class="tag recommended">已是最新</span>',
+        publishedAt: curPubTime,
+        htmlUrl: curUrl,
+      })}
+    </div>`;
   }
-  $('#shellCard').innerHTML = `<h2>容器（壳应用）</h2>${body}`;
+
+  $('#shellCard').innerHTML = `
+    <h2>容器（壳应用）</h2>
+    ${statusHtml}
+    ${listHtml}
+    ${errBoxHtml}
+  `;
+
   $('#shellRetry')?.addEventListener('click', refresh);
   $('#shellDownloadRetry')?.addEventListener('click', startShellAutoDownload);
-  $('#shellDownloadPage')?.addEventListener('click', () => {
-    if (s.latest?.htmlUrl) window.updateAPI.openExternal(s.latest.htmlUrl);
-  });
   $('#shellAutoDownload')?.addEventListener('click', startShellAutoDownload);
   $('#shellInstall')?.addEventListener('click', () => {
     const btn = $('#shellInstall');
@@ -314,6 +454,25 @@ function renderShellCard() {
     }
     window.updateAPI.installShellUpdate();
   });
+}
+
+async function loadShellChangelogs(bypassCache = false) {
+  shellChangelogLoading = true;
+  shellChangelogError = null;
+  renderShellCard();
+  try {
+    const res = await window.updateAPI.getShellChangelogs({ bypassCache });
+    if (res && res.ok && res.changelogs) {
+      shellChangelogs = res.changelogs;
+    } else {
+      shellChangelogError = res?.error || '获取更新记录失败';
+    }
+  } catch (err) {
+    shellChangelogError = String(err.message || err);
+  } finally {
+    shellChangelogLoading = false;
+    renderShellCard();
+  }
 }
 
 async function startShellAutoDownload() {
@@ -467,6 +626,7 @@ async function refresh() {
     $('#refreshBtn').disabled = false;
     render();
     loadChangelogs(true);
+    loadShellChangelogs(true);
   }
 }
 
@@ -532,9 +692,33 @@ document.addEventListener('click', (ev) => {
     loadChangelogs(true);
     return;
   }
+  const retryShellChangelog = ev.target.closest('#shellChangelogRetryBtn');
+  if (retryShellChangelog) {
+    ev.stopPropagation();
+    loadShellChangelogs(true);
+    return;
+  }
 
-  // 4. 版本 Header 点击：切换收缩/展开（默认收缩）
-  const header = ev.target.closest('.version-header');
+  // 4. 壳版本 Header 点击：切换收缩/展开（默认收缩）
+  const shellHeader = ev.target.closest('.shell-version-header');
+  if (shellHeader) {
+    const ver = shellHeader.dataset.shellVer;
+    if (ver) {
+      if (expandedShellVersions.has(ver)) {
+        expandedShellVersions.delete(ver);
+      } else {
+        expandedShellVersions.add(ver);
+        if (!shellChangelogs && !shellChangelogLoading) {
+          loadShellChangelogs();
+        }
+      }
+      renderShellCard();
+    }
+    return;
+  }
+
+  // 5. 内核版本 Header 点击：切换收缩/展开（默认收缩）
+  const header = ev.target.closest('.version-header:not(.shell-version-header)');
   if (header) {
     const ver = header.dataset.ver;
     if (ver) {
@@ -573,6 +757,7 @@ async function load() {
   STATE = await window.updateAPI.getState();
   render();
   loadChangelogs();
+  loadShellChangelogs();
 }
 load();
 </script>

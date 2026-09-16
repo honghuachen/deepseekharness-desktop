@@ -28,8 +28,19 @@ function registerIpc(context) {
 
   ipcMain.handle(`${CHANNEL}:get-state`, () => collectState());
   ipcMain.handle(`${CHANNEL}:refresh`, () => {
+    context.clearShellReleasesCache?.();
     context.clearKernelReleasesCache?.();
     return collectState();
+  });
+
+  ipcMain.handle(`${CHANNEL}:get-shell-changelogs`, async (_evt, payload) => {
+    try {
+      const changelogs = await context.getShellChangelogs?.(payload);
+      return { ok: true, changelogs };
+    } catch (err) {
+      context.log?.(`[update-window] 获取容器更新日志失败：${err.message}`);
+      return { ok: false, error: String(err.message || err) };
+    }
   });
 
   ipcMain.handle(`${CHANNEL}:get-kernel-changelogs`, async (_evt, payload) => {
@@ -102,6 +113,7 @@ function registerIpc(context) {
   return () => {
     ipcMain.removeHandler(`${CHANNEL}:get-state`);
     ipcMain.removeHandler(`${CHANNEL}:refresh`);
+    ipcMain.removeHandler(`${CHANNEL}:get-shell-changelogs`);
     ipcMain.removeHandler(`${CHANNEL}:get-kernel-changelogs`);
     ipcMain.removeHandler(`${CHANNEL}:switch-kernel`);
     ipcMain.removeHandler(`${CHANNEL}:clear-pin`);

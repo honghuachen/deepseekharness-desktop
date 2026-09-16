@@ -150,6 +150,25 @@ async function main() {
     assert.match(res.error, /ERR_CONNECTION_RESET/);
   });
 
+  await t('checkAndDownload: 缺少 latest.yml (404) 转换为友好中文提示且剥除冗长 Headers', async () => {
+    const mock = createMockUpdater();
+    const raw404Error = new Error(
+      'Cannot find latest.yml in the latest release artifacts (https://github.com/foo/bar/releases/download/v1.6.7/latest.yml): HttpError: 404 \n"method: GET url: https://github.com/..."\nHeaders: {\n  "date": "..."\n}',
+    );
+    mock.checkForUpdates = async () => {
+      process.nextTick(() => {
+        mock.emit('error', raw404Error);
+      });
+    };
+
+    const su = createShellAutoUpdater({ isSupported: true, updater: mock });
+    const res = await su.checkAndDownload();
+
+    assert.equal(res.ok, false);
+    assert.match(res.error, /新版本安装包未就绪/);
+    assert.ok(!res.error.includes('Headers:'));
+  });
+
   await t('quitAndInstall: 正确转发到 updater.quitAndInstall 且默认静默安装并自动重启', () => {
     const mock = createMockUpdater();
     const su = createShellAutoUpdater({ isSupported: true, updater: mock });

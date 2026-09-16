@@ -3,8 +3,12 @@
  * update-monitor.js 无头单测：
  *   1) computeUpdateOverview 组合判定（壳有/无、内核有/无、版本比对、null 容错）
  *   2) createUpdateMonitor 轮询、并发防抖与 onStatusChange 回调
+ *   3) 可靠性：检测失败粘性沿用、失败快速重试、ingest 回传、persistPath 落盘恢复
  */
 import assert from 'node:assert/strict';
+import fsSync from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -286,6 +290,147 @@ async function main() {
     assert.equal(status.kernel.hasUpdate, false);
 
     monitor.stop();
+  });
+
+  process.stdout.write('可靠性（粘性/重试/回传/落盘）:\n');
+
+  await t('壳检测失败（GitHub 限流/断网）→ 沿用上次成功结果，更新标记不丢失', async () => {
+    let calls = 0;
+    const monitor = createUpdateMonitor({
+      getShellInfo: async () => {
+        calls += 1;
+        return calls === 1
+          ? { currentVersion: '1.6.6', latest: { latestTag: '1.6.7', hasUpdate: true } }
+          : { currentVersion: '1.6.6', latest: null };
+      },
+      getKernelInfo: async () => ({ activeVersion: '0.1.6-alpha.1', latestTag: '0.1.6-alpha.1' }),
+    });
+
+    const first = await monitor.checkNow();
+    assert.equal(first.hasUpdate, true);
+    assert.equal(first.shell.hasUpdate, true);
+
+    const second = await monitor.checkNow(); // 这次检测失败
+    assert.equal(second.hasUpdate, true, '检测失败后 hasUpdate 不应翻回 false');
+    assert.equal(second.shell.latest, '1.6.7');
+    assert.equal(second.shell.hasUpdate, true);
+
+    monitor.stop();
+  });
+
+  await t('成功检测到已是最新后，粘性状态被解除；之后的失败也不会复活旧标记', async () => {
+    let latest = { latestTag: '1.6.7', hasUpdate: true };
+    const monitor = createUpdateMonitor({
+      getShellInfo: async () => ({ currentVersion: '1.6.6', latest }),
+      getKernelInfo: async () => ({ activeVersion: '0.1.6-alpha.1', latestTag: '0.1.6-alpha.1' }),
+    });
+
+    await monitor.checkNow();
+    assert.equal(monitor.getStatus().shell.hasUpdate, true);
+
+    latest = { latestTag: '1.6.6', hasUpdate: false }; // 用户已升级，检测成功
+    const status = await monitor.checkNow();
+    assert.equal(status.hasUpdate, false);
+
+    latest = null; // 随后一次检测失败
+    const afterFail = await monitor.checkNow();
+    assert.equal(afterFail.hasUpdate, false, '失败沿用「无更新」的粘性结果，不应复活旧标记');
+
+    monitor.stop();
+  });
+
+  await t('失败后按 retryIntervalMs 快速重试，成功后恢复常规间隔', async () => {
+    let ok = false;
+    const monitor = createUpdateMonitor({
+      getShellInfo: async () =>
+        ok
+          ? { currentVersion: '1.6.6', latest: { latestTag: '1.6.7', hasUpdate: true } }
+          : { currentVersion: '1.6.6', latest: null },
+      getKernelInfo: async () => ({ activeVersion: '0.1.6-alpha.1', latestTag: '0.1.6-alpha.1' }),
+      intervalMs: 30 * 60 * 1000,
+      retryIntervalMs: 1000,
+    });
+
+    await monitor.start();
+    assert.equal(monitor.getNextDelayMs(), 1000, '检测失败后应安排快速重试');
+
+    ok = true;
+    await monitor.checkNow();
+    assert.equal(monitor.getNextDelayMs(), 30 * 60 * 1000, '成功后恢复常规间隔');
+
+    monitor.stop();
+  });
+
+  await t('ingest：检查更新窗口的壳检测结果立即驱动升级徽标', async () => {
+    const notifications = [];
+    const monitor = createUpdateMonitor({
+      getShellInfo: async () => ({ currentVersion: '1.6.6', latest: null }), // 启动时检测失败
+      getKernelInfo: async () => ({ activeVersion: '0.1.6-alpha.1', latestTag: '0.1.6-alpha.1' }),
+      onStatusChange: (s) => notifications.push(s),
+    });
+
+    await monitor.checkNow();
+    assert.equal(monitor.getStatus().hasUpdate, false);
+
+    monitor.ingest({ shell: { currentVersion: '1.6.6', latest: { latestTag: '1.6.7', hasUpdate: true } } });
+    assert.equal(monitor.getStatus().hasUpdate, true);
+    assert.equal(monitor.getStatus().shell.latest, '1.6.7');
+    assert.ok(notifications.some((s) => s.hasUpdate === true), '状态变化应触发 onStatusChange');
+
+    monitor.stop();
+  });
+
+  await t('ingest 传入失败的壳结果（latest:null）→ 不破坏已有粘性状态', async () => {
+    const monitor = createUpdateMonitor({
+      getShellInfo: async () => ({ currentVersion: '1.6.6', latest: { latestTag: '1.6.7', hasUpdate: true } }),
+      getKernelInfo: async () => ({ activeVersion: '0.1.6-alpha.1', latestTag: '0.1.6-alpha.1' }),
+    });
+    await monitor.checkNow();
+    assert.equal(monitor.getStatus().hasUpdate, true);
+
+    monitor.ingest({ shell: { currentVersion: '1.6.6', latest: null } });
+    assert.equal(monitor.getStatus().hasUpdate, true, '失败结果不应清掉已有更新标记');
+
+    monitor.stop();
+  });
+
+  await t('persistPath：重启后即使壳检测失败，也能立即恢复更新标记；升级后不误报', async () => {
+    const persistPath = path.join(os.tmpdir(), `dsh-update-monitor-test-${process.pid}-${Date.now()}.json`);
+    try {
+      const monitorA = createUpdateMonitor({
+        getShellInfo: async () => ({
+          currentVersion: '1.6.6',
+          latest: { latestTag: '1.6.7', htmlUrl: 'https://example.com', hasUpdate: true },
+        }),
+        getKernelInfo: async () => ({ activeVersion: '0.1.6-alpha.1', latestTag: '0.1.6-alpha.1' }),
+        persistPath,
+      });
+      await monitorA.checkNow();
+      monitorA.stop();
+
+      const monitorB = createUpdateMonitor({
+        getShellInfo: async () => ({ currentVersion: '1.6.6', latest: null }), // 重启后网络不可用
+        getKernelInfo: async () => ({ activeVersion: '0.1.6-alpha.1', latestTag: '0.1.6-alpha.1' }),
+        persistPath,
+        getCurrentShellVersion: () => '1.6.6',
+      });
+      const statusB = await monitorB.checkNow();
+      assert.equal(statusB.hasUpdate, true, '重启后应从落盘缓存恢复更新标记');
+      assert.equal(statusB.shell.latest, '1.6.7');
+      monitorB.stop();
+
+      const monitorC = createUpdateMonitor({
+        getShellInfo: async () => ({ currentVersion: '1.6.7', latest: null }), // 已升级到 1.6.7 后断网
+        getKernelInfo: async () => ({ activeVersion: '0.1.6-alpha.1', latestTag: '0.1.6-alpha.1' }),
+        persistPath,
+        getCurrentShellVersion: () => '1.6.7',
+      });
+      const statusC = await monitorC.checkNow();
+      assert.equal(statusC.shell.hasUpdate, false, '缓存 latestTag 与当前版本相同时不应误报');
+      monitorC.stop();
+    } finally {
+      fsSync.rmSync(persistPath, { force: true });
+    }
   });
 
   if (failed > 0) {

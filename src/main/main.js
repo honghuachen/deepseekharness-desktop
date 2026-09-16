@@ -26,7 +26,11 @@ const {
   fetchKernelReleases,
   clearKernelReleasesCache,
 } = require('./kernel-versions');
-const { checkShellUpdate } = require('./shell-update');
+const {
+  checkShellUpdate,
+  fetchShellReleases,
+  clearShellReleasesCache,
+} = require('./shell-update');
 const { createShellAutoUpdater } = require('./shell-auto-updater');
 const { createUpdateMonitor } = require('./update-monitor');
 const { createRunner } = require('./runner');
@@ -433,6 +437,11 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
           mainWindow.webContents.send('update:status-changed', status);
         }
       },
+      // 沿用粘性结果时用当前版本重新比较，避免升级后误报
+      getCurrentShellVersion: () => app.getVersion(),
+      // 壳更新粘性结果落盘：重启后即使首次 GitHub 检测失败（限流/断网），升级徽标也立即恢复
+      persistPath: path.join(paths.rootDir, 'update-monitor-cache.json'),
+      retryIntervalMs: 90 * 1000,
       log: logLine,
     });
     updateMonitor.start();
@@ -695,8 +704,20 @@ async function switchKernelVersion(version, { pin, onLine } = {}) {
 function openUpdateWindow() {
   try {
     openUpdateWindowImpl({
-      getShellInfo,
-      getKernelInfo,
+      // 窗口的实时检测结果同步回监测器（ingest）：用户在窗口里看到容器/内核有新版后，
+      // 主界面侧边栏的升级徽标立即出现，无需等待下一次 30 分钟轮询
+      getShellInfo: async () => {
+        const info = await getShellInfo();
+        updateMonitor?.ingest?.({ shell: info });
+        return info;
+      },
+      getKernelInfo: async () => {
+        const info = await getKernelInfo();
+        updateMonitor?.ingest?.({ kernel: info });
+        return info;
+      },
+      getShellChangelogs: (opts) => fetchShellReleases({ ...opts, log: logLine }),
+      clearShellReleasesCache,
       getKernelChangelogs: (opts) => fetchKernelReleases({ ...opts, log: logLine }),
       clearKernelReleasesCache,
       switchKernelVersion,

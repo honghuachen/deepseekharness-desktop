@@ -110,7 +110,18 @@ function createShellAutoUpdater({ log = () => {}, updater = null, isSupported: c
       };
       const onNotAvailable = () => done({ ok: false, error: '当前已是最新版本' });
       const onDownloaded = () => done({ ok: true });
-      const onError = (err) => done({ ok: false, error: String(err?.message || err) });
+      const onError = (err) => {
+        let msg = String(err?.message || err || '未知更新错误');
+        if (/Cannot find latest\.ya?ml/i.test(msg) || /HttpError:\s*404/i.test(msg)) {
+          msg = '新版本安装包未就绪：GitHub Release 中尚未上传 latest.yml 安装元数据或安装包资源';
+        } else {
+          const headerIdx = msg.indexOf('\nHeaders:');
+          if (headerIdx !== -1) {
+            msg = msg.slice(0, headerIdx).trim();
+          }
+        }
+        done({ ok: false, error: msg });
+      };
 
       autoUpdater.on('update-available', onAvailable);
       autoUpdater.on('update-not-available', onNotAvailable);
