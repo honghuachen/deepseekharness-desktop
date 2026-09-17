@@ -37,7 +37,7 @@ const { createRunner } = require('./runner');
 const { createBadgeWatcher } = require('./badge');
 const { createLogger } = require('./logger');
 const { createStatusWindow } = require('./status-window');
-const { openPluginManager, getPluginUpdatesSummary } = require('./plugin-manager');
+const { openPluginManager, getPluginUpdatesSummary, checkPluginUpdates } = require('./plugin-manager');
 const { openAboutWindow } = require('./about-window');
 const { openTokenUsageWindow } = require('./token-usage/window');
 const { openUpdateWindow: openUpdateWindowImpl } = require('./update-window');
@@ -448,6 +448,15 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
   } else {
     updateMonitor.checkNow().catch(() => {});
   }
+
+  // 插件更新以前只会在插件管理器点击“检查全部更新”时访问 npm/GitHub；
+  // 因此重启后的监测器只能读取旧缓存，永远发现不了刚发布的新版。服务和主窗口
+  // 就绪后在后台检查一次，不阻塞应用启动；完成后立即让更新监测器读取新缓存。
+  logLine('[plugins] 启动后台检查第三方插件更新…');
+  checkPluginUpdates(dshHome, { log: logLine })
+    .then(() => updateMonitor?.checkNow())
+    .catch((err) => logLine(`[plugins] 启动后台检查第三方插件更新失败：${err.message}`));
+
   // 开发诊断：DSH_WEB_DEV_PM=1 时自动打开插件管理器
   if (process.env.DSH_WEB_DEV_PM) {
     setTimeout(() => {

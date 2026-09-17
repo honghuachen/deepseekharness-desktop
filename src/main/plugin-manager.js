@@ -136,7 +136,7 @@ function writeUpdatesCache(dshHome, data) {
 
 /**
  * 汇总更新缓存里所有 profile 的「有新版」条目数量，供全局升级徽标使用。
- * 仅读已有缓存（由插件管理器 checkUpdates 写入），不发起新的网络请求。
+ * 仅读已有缓存；缓存由启动后的后台检测和插件管理器的手动检测写入。
  */
 function getPluginUpdatesSummary(dshHome) {
   const cache = readUpdatesCache(dshHome);
@@ -149,6 +149,70 @@ function getPluginUpdatesSummary(dshHome) {
     }
   }
   return { hasUpdate: count > 0, count };
+}
+
+/** 返回 DSH_HOME 下存在的 profile 名称（按名称稳定排序）。 */
+function listProfileNames(dshHome) {
+  try {
+    return fsSync
+      .readdirSync(path.join(dshHome, 'profiles'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 检查指定（或全部）profile 的第三方插件更新，并持久化结果。
+ *
+ * 此函数不依赖插件管理器窗口，因而可由应用启动后的后台任务复用；以前检查逻辑
+ * 被限制在 IPC handler 内，导致冷启动只能读取旧缓存、无法探测新的插件版本。
+ */
+async function checkPluginUpdates(dshHome, {
+  profiles: profileFilter,
+  registry: suppliedRegistry,
+  githubChecker: suppliedGitHubChecker,
+  log = () => {},
+} = {}) {
+  const allNames = listProfileNames(dshHome);
+  const names = Array.isArray(profileFilter) && profileFilter.length
+    ? allNames.filter((name) => profileFilter.includes(name))
+    : allNames;
+  const registryChecker = suppliedRegistry || getRegistry(log);
+  const gitHubChecker = suppliedGitHubChecker || getGitHubChecker(log);
+  const updates = {};
+
+  await Promise.all(names.map(async (profile) => {
+    try {
+      updates[profile] = await checkProfileUpdates(path.join(dshHome, 'profiles', profile), {
+        registry: registryChecker,
+        githubChecker: gitHubChecker,
+        log,
+      });
+    } catch (err) {
+      updates[profile] = { error: String(err.message || err) };
+    }
+  }));
+
+  // 检查全部时清理已删除 profile 的旧缓存；单 profile 检查则保留其余结果。
+  const previous = readUpdatesCache(dshHome);
+  const cacheProfiles = Array.isArray(profileFilter) && profileFilter.length
+    ? { ...(previous?.profiles || {}) }
+    // 全量检测时仅保留仍存在的 profile；某一 profile 本次网络检测失败时，
+    // 保留它上次的结果，避免离线启动把已经确认的更新提示错误清掉。
+    : Object.fromEntries(allNames
+      .filter((profile) => Array.isArray(previous?.profiles?.[profile]))
+      .map((profile) => [profile, previous.profiles[profile]]));
+  for (const [profile, list] of Object.entries(updates)) {
+    if (Array.isArray(list)) cacheProfiles[profile] = list;
+  }
+  writeUpdatesCache(dshHome, {
+    checkedAt: new Date().toISOString(),
+    profiles: cacheProfiles,
+  });
+  return { updates };
 }
 
 /**
@@ -392,43 +456,12 @@ function registerIpc(context) {
     }
     if (cmd === 'checkUpdates') {
       // 可选：仅检查指定 profile；未传则检查所有 profile
-      const profileFilter = payload?.profiles; // string[] | undefined
-      const profilesRoot = path.join(context.dshHome(), 'profiles');
-      let names = [];
-      try {
-        names = fsSync
-          .readdirSync(profilesRoot, { withFileTypes: true })
-          .filter((e) => e.isDirectory())
-          .map((e) => e.name)
-          .sort();
-      } catch {}
-      if (Array.isArray(profileFilter) && profileFilter.length) {
-        names = names.filter((n) => profileFilter.includes(n));
-      }
-      const reg = getRegistry(context.log);
-      const gh = getGitHubChecker(context.log);
-      const updates = {};
-      await Promise.all(
-        names.map(async (p) => {
-          const dir = path.join(profilesRoot, p);
-          try {
-            updates[p] = await checkProfileUpdates(dir, { registry: reg, githubChecker: gh, log: context.log });
-          } catch (err) {
-            updates[p] = { error: String(err.message || err) };
-          }
-        }),
-      );
-      // 持久化成功检查的结果：下次打开插件管理器先用缓存展示，再后台刷新
-      const cacheProfiles = {};
-      for (const [p, list] of Object.entries(updates)) {
-        if (Array.isArray(list)) cacheProfiles[p] = list;
-      }
-      writeUpdatesCache(context.dshHome(), {
-        checkedAt: new Date().toISOString(),
-        profiles: cacheProfiles,
+      const result = await checkPluginUpdates(context.dshHome(), {
+        profiles: payload?.profiles,
+        log: context.log,
       });
       context.onUpdatesCacheChanged?.();
-      return { updates };
+      return result;
     }
     if (cmd === 'update') {
       // payload: { profile: string, name: string, target?: string }
@@ -752,5 +785,6 @@ module.exports = {
   readUpdatesCache,
   writeUpdatesCache,
   getPluginUpdatesSummary,
+  checkPluginUpdates,
   rollbackPendingMutation,
 };

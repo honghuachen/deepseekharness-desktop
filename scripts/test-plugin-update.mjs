@@ -35,7 +35,13 @@ const {
   isOfficial,
   parsePnpmProgressLine,
 } = guard;
-const { buildInventory, rollbackPendingMutation } = require(path.join(__dirname, '..', 'src', 'main', 'plugin-manager.js'));
+const {
+  buildInventory,
+  checkPluginUpdates,
+  readUpdatesCache,
+  writeUpdatesCache,
+  rollbackPendingMutation,
+} = require(path.join(__dirname, '..', 'src', 'main', 'plugin-manager.js'));
 
 let failed = 0;
 function t(name, fn) {
@@ -411,6 +417,41 @@ async function main() {
     }, null, 2) + '\n');
     const out = await checkProfileUpdates(dir, {});
     assert.deepEqual(out, []);
+  });
+  await t('checkPluginUpdates：启动后台检测全部 profile 并刷新更新缓存', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-startup-check-'));
+    const web = path.join(home, 'profiles', 'web');
+    const headless = path.join(home, 'profiles', 'headless');
+    fs.mkdirSync(web, { recursive: true });
+    fs.mkdirSync(headless, { recursive: true });
+    fs.writeFileSync(path.join(web, 'package.json'), JSON.stringify({
+      name: 'web', private: true, dependencies: { 'has-new-version': '^1.0.0' },
+    }));
+    fs.writeFileSync(path.join(headless, 'package.json'), JSON.stringify({
+      name: 'headless', private: true, dependencies: { 'already-current': '^2.0.0' },
+    }));
+    writeUpdatesCache(home, {
+      checkedAt: '2000-01-01T00:00:00.000Z',
+      profiles: { removed: [{ name: 'stale-plugin', status: 'outdated' }] },
+    });
+    const registry = {
+      fetchLatestMany: async (names) => new Map(names.map((name) => [
+        name,
+        name === 'has-new-version' ? '1.1.0' : '2.0.0',
+      ])),
+    };
+    const githubChecker = { fetchLatestMany: async () => new Map(), fetchLatest: async () => null };
+    try {
+      const { updates } = await checkPluginUpdates(home, { registry, githubChecker });
+      assert.equal(updates.web[0].status, 'outdated');
+      assert.equal(updates.headless[0].status, 'current');
+      const cache = readUpdatesCache(home);
+      assert.equal(cache.profiles.web[0].status, 'outdated');
+      assert.equal(cache.profiles.headless[0].status, 'current');
+      assert.equal(cache.profiles.removed, undefined, '全量检测应清掉已删除 profile 的陈旧缓存');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
   await t('isOfficial 识别官方前缀', () => {
     assert.equal(isOfficial('@deepseek-ai/dsh'), true);
