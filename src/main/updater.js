@@ -239,11 +239,20 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
     }
   }
 
-  function onLogPrune(name) {
-    log(`[update] 清理旧版本 ${name}`);
+  function checkVersionComplete(versionOrDir) {
+    if (!versionOrDir || typeof versionOrDir !== 'string') return false;
+    let vdir = versionOrDir;
+    try {
+      if (!path.isAbsolute(versionOrDir)) {
+        vdir = paths.versionDir(versionOrDir);
+      }
+    } catch {
+      return false;
+    }
+    return isVersionComplete(vdir);
   }
 
-  return { getLatestVersion, getCurrentVersion, install, activate, prune };
+  return { getLatestVersion, getCurrentVersion, install, activate, prune, isVersionComplete: checkVersionComplete };
 }
 
 module.exports = { createUpdater };

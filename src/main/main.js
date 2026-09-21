@@ -5,9 +5,9 @@
  *
  * 启动流程：
  *   1. 解析 node 运行器（优先内置便携 node，其次系统 PATH node）
- *   2. 查询 npm registry 上 @deepseek-ai/dsh 的最新版本
- *   3. 与本地已装版本比较；有新版则下载安装并原子切换
- *   4. 拉起官方 `dsh web` 服务，健康检查通过后用主窗口加载官方页面
+ *   2. 确定内核运行时：优先使用本地已安装版本直接启动（仅首次运行且无本地内核时才在线下载）
+ *   3. 拉起官方 `dsh web` 服务，健康检查通过后用主窗口加载官方页面
+ *   4. 就绪后在后台静默运行更新监测器，发现新版本通过侧边栏徽标与更新面板提示用户
  */
 
 const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require('electron');
@@ -380,37 +380,56 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
 
   let installed;
   if (settings.pinnedKernelVersion) {
-    // 用户已手动固定版本：尊重这个选择，不查询/比较 latest（除非用户在更新窗口里主动恢复自动跟随）
+    // 1. 用户手动固定了版本：检查本地是否已完整安装
     const pinned = settings.pinnedKernelVersion;
-    statusText(`使用固定内核版本 ${pinned}…`);
-    await updater.install(pinned, statusText); // install() 本身已幂等，已装过则跳过下载
-    await updater.activate(pinned);
-    installed = pinned;
-    recordDownloadedKernel(installed);
-    await updater.prune(2, [installed]);
-  } else {
-    const latest = settings.autoCheckUpdates ? await updater.getLatestVersion() : null;
-    installed = await updater.getCurrentVersion();
-
-    if (latest && compareVersions(latest, installed ?? '0.0.0') > 0) {
-      statusText(
-        installed
-          ? `检测到新版本 ${latest}（当前 ${installed}），开始更新…`
-          : `首次运行：正在安装官方运行时 ${latest}…`,
-      );
-      await updater.install(latest, statusText);
-      await updater.activate(latest);
-      installed = latest;
+    if (updater.isVersionComplete(pinned)) {
+      statusText(`使用固定内核版本 ${pinned}…`);
+      const current = await updater.getCurrentVersion();
+      if (current !== pinned) {
+        await updater.activate(pinned);
+      }
+      installed = pinned;
+    } else {
+      statusText(`下载并安装固定内核版本 ${pinned}…`);
+      await updater.install(pinned, statusText);
+      await updater.activate(pinned);
+      installed = pinned;
       recordDownloadedKernel(installed);
       await updater.prune(2, [installed]);
-    } else if (installed) {
-      statusText(latest ? `已是最新版本 ${installed}` : `离线：使用已装版本 ${installed}`);
+    }
+  } else {
+    // 2. 跟随模式：优先使用本地已安装且完备的内核秒起服务，彻底移除启动期的外网同步阻塞
+    const current = await updater.getCurrentVersion();
+    if (current && updater.isVersionComplete(current)) {
+      installed = current;
+      statusText(`使用本地内核版本 ${installed}…`);
     } else {
-      throw new Error(
-        '本地没有任何官方运行时，且无法连接 npm registry。\n请联网后重试。',
-      );
+      // 容错自愈：当前软链接若异常，尝试查找本地其他完整安装的版本
+      const installedCandidates = getInstalledKernelVersions().filter((v) => updater.isVersionComplete(v));
+      if (installedCandidates.length > 0) {
+        installedCandidates.sort((a, b) => compareVersions(b, a));
+        installed = installedCandidates[0];
+        statusText(`恢复使用本地已装内核 ${installed}…`);
+        await updater.activate(installed);
+      } else {
+        // 本地没有任何可用运行时（全新首次运行）：阻断查询 registry 并执行初始安装
+        statusText('首次运行：正在查询官方最新运行时…');
+        const latest = await updater.getLatestVersion();
+        if (!latest) {
+          throw new Error(
+            '本地没有任何官方运行时，且无法连接 npm registry。\n请检查网络连接后重试。',
+          );
+        }
+        statusText(`首次运行：正在安装官方运行时 ${latest}…`);
+        await updater.install(latest, statusText);
+        await updater.activate(latest);
+        installed = latest;
+        recordDownloadedKernel(installed);
+        await updater.prune(2, [installed]);
+      }
     }
   }
+  recordDownloadedKernel(installed);
 
   activeVersion = installed;
   const dshHome = resolveDshHome();

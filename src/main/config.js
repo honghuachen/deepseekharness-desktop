@@ -26,13 +26,14 @@ const DEFAULT_PORT = 43130;
 const DEFAULT_SETTINGS = {
   port: DEFAULT_PORT,
   channel: 'latest', // 目前仅支持 npm latest 频道
+  // 是否在后台自动检测更新（壳应用、官方内核及第三方插件）
   autoCheckUpdates: true,
   // 会话数据根（DSH_HOME）。留空 = 官方标准 ~/.dsh，会话历史无缝延续。
   // 如需完全隔离可指向自定义目录（例如 "~/Library/Application Support/DSH Web/dsh-home"）。
   dshHome: '',
   // 会话任务完成后在 Dock 图标上显示完成数量角标（聚焦窗口即清零）
   taskBadge: true,
-  // 内核版本固定：空 = 跟随 npm latest 自动更新；非空 = 固定到具体版本号，启动时不再比较 latest
+  // 内核版本固定：空 = 跟随最新版本（启动优先使用本地已装内核，后台检测新版并提示）；非空 = 固定到具体版本号，不提示升级
   pinnedKernelVersion: '',
   // 已下载/安装过的内核版本历史，防止切换回低版本时重复触发已下载版本的升级提示
   downloadedKernelVersions: [],

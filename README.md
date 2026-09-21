@@ -4,18 +4,18 @@ English | [中文](README.zh.md)
 
 An extremely thin, cross-platform (macOS + Windows) desktop container: **the window always runs the official [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) web shell** — the container itself ships no business UI of its own.
 
-Core capability: **it automatically checks for and updates to the latest official release on every launch.**
+Core capability: **fast cold start using local runtime, with automatic background update detection and seamless switching.**
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │  DSH Web.app (thin Electron shell)                   │
 │                                                       │
-│  1. Query npm registry: @deepseek-ai/dsh latest      │
-│  2. New version found → pnpm-install into versions/  │
-│  3. Atomically flip the `current` symlink → rollback │
-│  4. Launch the official `dsh web` service            │
-│     (127.0.0.1:<port>)                               │
-│  5. Window loads the official page ← 100% official   │
+│  1. Fast-start using installed local kernel          │
+│     (zero network blocking on launch)                │
+│  2. Launch official `dsh web` (127.0.0.1:<port>)     │
+│  3. Window loads official page ← 100% official       │
+│  4. Background update monitor detects new releases   │
+│  5. Update window provides seamless 1-click upgrades │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -108,10 +108,10 @@ Menu **DSH Web → Check for Updates…** (⌘U) opens a dedicated window coveri
 {
   "port": 43130,             // web service port; auto-probes forward if taken
   "channel": "latest",       // update channel (currently only npm's `latest`)
-  "autoCheckUpdates": true,  // disable to skip the update check on every launch
+  "autoCheckUpdates": true,  // background update detection for shell, kernel, and plugins
   "dshHome": "",             // empty = the official standard ~/.dsh; point elsewhere to isolate data
   "taskBadge": true,         // show a completed-task count badge on the Dock/taskbar icon
-  "pinnedKernelVersion": ""  // empty = auto-update to npm `latest`; set via the Check for Updates window to pin a specific kernel version
+  "pinnedKernelVersion": ""  // empty = follow latest release; set via the Check for Updates window to pin a specific kernel version
 }
 ```
 

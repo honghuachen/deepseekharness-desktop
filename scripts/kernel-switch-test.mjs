@@ -142,6 +142,37 @@ async function main() {
     assert(BUILD_ALLOWLIST.includes('koffi'), 'koffi 必须在 BUILD_ALLOWLIST 中');
   });
 
+  await t('updater.isVersionComplete 正确校验版本完整性', async () => {
+    const { createUpdater } = require('../src/main/updater.js');
+    const { makePaths } = require('../src/main/config.js');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const os = require('node:os');
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-test-updater-'));
+    try {
+      const paths = makePaths(tmpDir);
+      const updater = createUpdater({ nodeBin: process.execPath, pnpmCjs: 'dummy', paths });
+      assert.equal(typeof updater.isVersionComplete, 'function');
+      assert.equal(updater.isVersionComplete(''), false);
+      assert.equal(updater.isVersionComplete(null), false);
+      assert.equal(updater.isVersionComplete('0.1.5'), false);
+
+      const vdir = paths.versionDir('0.1.5');
+      fs.mkdirSync(vdir, { recursive: true });
+      assert.equal(updater.isVersionComplete('0.1.5'), false);
+
+      const binPath = path.join(vdir, 'node_modules/@deepseek-ai/dsh/lib/bin.js');
+      fs.mkdirSync(path.dirname(binPath), { recursive: true });
+      fs.writeFileSync(binPath, '// dummy');
+      fs.writeFileSync(path.join(vdir, '.install-complete'), '{}');
+      assert.equal(updater.isVersionComplete('0.1.5'), true);
+      assert.equal(updater.isVersionComplete(vdir), true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   if (failed) {
     process.stdout.write(`\n共 ${failed} 项断言失败\n`);
     process.exit(1);
