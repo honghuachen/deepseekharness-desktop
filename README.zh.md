@@ -82,7 +82,7 @@ Windows 说明：
   - **Windows**：接了 `electron-updater`，可以直接"下载并安装"，装完点"重启并安装"原地替换重启；因为安装包未签名，关闭了运行时的 Authenticode 签名校验（`electron-builder.yml` 里 `win.verifyUpdateCodeSignature: false`）。发版时除了安装包本身，还要把 `electron-builder` 生成的 `latest.yml`/`.blockmap` 一起传到 Release，否则自动更新查不到新版本。
   - **macOS**：未签名/未公证，Squirrel.Mac 强制要求签名才能自动更新，继续只做检测 + 提供跳转到 Release 页面的按钮。
 - **内核（`@deepseek-ai/dsh`）**：按时间倒序列出 npm 上发布过的全部版本，标注 `alpha` / `rc`（或者一旦官方真的发布正式版，`stable`），npm `latest` dist-tag 对应的那个版本标"推荐"。可以切换到列表里的任意版本；切换会短暂重启后台服务，并实时展示安装日志。
-- 切换到某个版本会**固定**它：之后启动时不再自动检测更新，`prune()` 清理也不会碰它（即使它超出"最近 2 个版本"的范围）。点击**"恢复自动跟随最新推荐版"**可以取消固定，恢复到每次启动都自动更新到 npm `latest`。
+- 切换版本后会**固定**它：用户可以根据需要自由切换到列表中的任意版本，切换后始终保持固定，`prune()` 清理也不会碰当前激活与固定的版本。
 - 容器和内核两边的检测互相独立——GitHub API 抖动只会让容器那张卡片显示"检测失败，点击重试"，不影响内核那边正常工作。
 
 > 这里的"推荐"指的是 npm 的 `latest` dist-tag（官方从一开始就在维护这个标签），**不是** semver 里"无预发布后缀"那个概念。截至目前，`@deepseek-ai/dsh` 发布的每一个版本仍然带 `-rc.N`/`-alpha.N` 后缀，还没有真正的正式版——UI 上刻意不用"稳定版"这个词，就是这个原因。

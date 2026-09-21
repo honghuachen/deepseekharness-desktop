@@ -432,6 +432,10 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
   recordDownloadedKernel(installed);
 
   activeVersion = installed;
+  if (settings.pinnedKernelVersion !== installed) {
+    settings.pinnedKernelVersion = installed;
+    saveSettings(paths, settings);
+  }
   const dshHome = resolveDshHome();
   await ensureOfficialProfile(dshHome);
   setupTaskBadge(dshHome);
@@ -687,7 +691,7 @@ async function getKernelInfo() {
  * "更新窗口里手动切换"共用。任一步失败都不推进 activeVersion/pinnedKernelVersion，
  * 并尽量把之前的服务重新拉起来，不留半成品状态。
  */
-async function switchKernelVersion(version, { pin, onLine } = {}) {
+async function switchKernelVersion(version, { pin = true, onLine } = {}) {
   const dshHome = resolveDshHome();
   const wasRunning = runner?.isRunning();
   const previousVersion = activeVersion;
@@ -695,7 +699,7 @@ async function switchKernelVersion(version, { pin, onLine } = {}) {
   if (wasRunning) await runner.stop();
 
   try {
-    await kernelSwitcher.switchKernelVersion(version, { pin, onLine });
+    await kernelSwitcher.switchKernelVersion(version, { pin: true, onLine });
     activeVersion = version;
     recordDownloadedKernel(version);
     await updater.prune(2, [activeVersion, settings.pinnedKernelVersion].filter(Boolean));

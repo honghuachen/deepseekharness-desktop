@@ -234,7 +234,7 @@ function createUpdater({ nodeBin, pnpmCjs, paths, log = () => {} }) {
         .realpath(paths.currentLink)
         .catch(() => null);
       if (resolvedCurrent && resolvedCurrent.startsWith(dir + path.sep)) continue;
-      onLogPrune(name);
+      log(`[update] 清理旧版本 ${name}`);
       await fsPromises.rm(dir, { recursive: true, force: true }).catch(() => {});
     }
   }

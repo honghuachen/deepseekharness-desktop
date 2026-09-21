@@ -54,26 +54,13 @@ function registerIpc(context) {
   });
 
   ipcMain.handle(`${CHANNEL}:switch-kernel`, async (_evt, payload) => {
-    const { version, pin } = payload || {};
+    const { version } = payload || {};
     if (typeof version !== 'string' || !version) return { ok: false, error: '缺少版本号' };
     try {
-      await context.switchKernelVersion(version, { pin: pin !== false, onLine: send });
+      await context.switchKernelVersion(version, { pin: true, onLine: send });
       return { ok: true, state: await collectState() };
     } catch (err) {
       context.log?.(`[update-window] 切换内核版本失败：${err.message}`);
-      return { ok: false, error: String(err.message || err) };
-    }
-  });
-
-  ipcMain.handle(`${CHANNEL}:clear-pin`, async () => {
-    try {
-      const kernel = await context.getKernelInfo();
-      const target = kernel.latestTag || kernel.activeVersion;
-      if (!target) throw new Error('无法确定要跟随的版本');
-      await context.switchKernelVersion(target, { pin: false, onLine: send });
-      return { ok: true, state: await collectState() };
-    } catch (err) {
-      context.log?.(`[update-window] 恢复自动跟随失败：${err.message}`);
       return { ok: false, error: String(err.message || err) };
     }
   });
@@ -116,7 +103,6 @@ function registerIpc(context) {
     ipcMain.removeHandler(`${CHANNEL}:get-shell-changelogs`);
     ipcMain.removeHandler(`${CHANNEL}:get-kernel-changelogs`);
     ipcMain.removeHandler(`${CHANNEL}:switch-kernel`);
-    ipcMain.removeHandler(`${CHANNEL}:clear-pin`);
     ipcMain.removeHandler(`${CHANNEL}:open-external`);
     ipcMain.removeHandler(`${CHANNEL}:shell-download`);
     ipcMain.removeHandler(`${CHANNEL}:shell-install`);

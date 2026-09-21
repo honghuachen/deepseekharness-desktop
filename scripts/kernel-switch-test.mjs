@@ -120,11 +120,11 @@ async function main() {
     assert.equal(savedSnapshots.at(-1).pinnedKernelVersion, '');
   });
 
-  await t('pin 未传（undefined）→ 不改动 pinnedKernelVersion，但仍落盘', async () => {
+  await t('pin 未传（undefined）→ 默认 pin=true，固定 pinnedKernelVersion=目标版本', async () => {
     const { switcher, settings, savedSnapshots } = makeFixture();
     settings.pinnedKernelVersion = '0.1.0-alpha.1';
     await switcher.switchKernelVersion('0.1.2-rc.1', {});
-    assert.equal(settings.pinnedKernelVersion, '0.1.0-alpha.1');
+    assert.equal(settings.pinnedKernelVersion, '0.1.2-rc.1');
     assert.equal(savedSnapshots.length, 1);
   });
 
@@ -168,6 +168,39 @@ async function main() {
       fs.writeFileSync(path.join(vdir, '.install-complete'), '{}');
       assert.equal(updater.isVersionComplete('0.1.5'), true);
       assert.equal(updater.isVersionComplete(vdir), true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await t('updater.prune 正常执行旧版本清理且不报 onLogPrune 异常', async () => {
+    const { createUpdater } = require('../src/main/updater.js');
+    const { makePaths } = require('../src/main/config.js');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const os = require('node:os');
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-test-prune-'));
+    const logs = [];
+    try {
+      const paths = makePaths(tmpDir);
+      fs.mkdirSync(paths.versionsDir, { recursive: true });
+      fs.mkdirSync(path.join(paths.versionsDir, 'v0.1.1'));
+      fs.mkdirSync(path.join(paths.versionsDir, 'v0.1.2'));
+      fs.mkdirSync(path.join(paths.versionsDir, 'v0.1.3'));
+
+      const updater = createUpdater({
+        nodeBin: process.execPath,
+        pnpmCjs: 'dummy',
+        paths,
+        log: (line) => logs.push(line),
+      });
+
+      await updater.prune(2, ['0.1.3']);
+
+      const remaining = fs.readdirSync(paths.versionsDir).sort();
+      assert.deepEqual(remaining, ['v0.1.2', 'v0.1.3'], '应清理掉最旧的 v0.1.1，保留 v0.1.2 与 v0.1.3');
+      assert(logs.some((l) => l.includes('清理旧版本 v0.1.1')), '应输出清理日志');
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

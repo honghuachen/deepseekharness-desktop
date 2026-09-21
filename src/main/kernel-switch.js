@@ -9,7 +9,7 @@
  * 调用方（main.js）据此保持切换前的 activeVersion/pinnedKernelVersion 不变。
  */
 function createKernelSwitcher({ updater, settings, paths, saveSettings, log = () => {} }) {
-  async function switchKernelVersion(version, { pin, onLine } = {}) {
+  async function switchKernelVersion(version, { pin = true, onLine } = {}) {
     await updater.install(version, onLine || log);
     await updater.activate(version);
 

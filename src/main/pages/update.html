@@ -488,11 +488,7 @@ async function startShellAutoDownload() {
 function kernelStatusLine() {
   const k = STATE.kernel;
   const activeLabel = k.activeVersion ? `v${esc(k.activeVersion)}` : '未知';
-  if (k.pinnedVersion) {
-    return `<span class="status">当前激活 <b>${activeLabel}</b> · <span class="tag pinned">已固定</span></span>
-      <button id="clearPinBtn" ${switching ? 'disabled' : ''}>恢复自动跟随最新推荐版</button>`;
-  }
-  return `<span class="status">当前激活 <b>${activeLabel}</b> · <span class="tag recommended">跟随最新推荐版</span></span>`;
+  return `<span class="status">当前激活 <b>${activeLabel}</b> · <span class="tag pinned">已固定此版本</span></span>`;
 }
 
 function renderChangelogPanel(version) {
@@ -591,7 +587,6 @@ function renderKernelCard() {
     ${logHtml}
   `;
   $('#kernelRetry')?.addEventListener('click', refresh);
-  $('#clearPinBtn')?.addEventListener('click', clearPin);
 }
 
 function render() {
@@ -630,26 +625,12 @@ async function refresh() {
   }
 }
 
-async function clearPin() {
-  switchError = null;
-  switching = { version: STATE.kernel.latestTag || STATE.kernel.activeVersion, logs: [] };
-  render();
-  const res = await window.updateAPI.clearPin();
-  switching = null;
-  if (res.ok) {
-    STATE = res.state;
-  } else {
-    switchError = res.error || '恢复自动跟随失败';
-  }
-  render();
-}
-
 async function doSwitch(version) {
   confirmVersion = null;
   switchError = null;
   switching = { version, logs: [] };
   render();
-  const res = await window.updateAPI.switchKernel(version, true);
+  const res = await window.updateAPI.switchKernel(version);
   switching = null;
   if (res.ok) {
     STATE = res.state;
