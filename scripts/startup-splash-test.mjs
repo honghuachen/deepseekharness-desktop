@@ -30,12 +30,12 @@ console.log('=== 启动屏 (splash.js) 测试 ===');
   assert(html.includes('__dshUpdateStatus'), '包含动态状态更新客户端方法 __dshUpdateStatus');
   assert(html.includes('__dshShowError'), '包含错误展示客户端方法 __dshShowError');
   assert(html.includes('__dshShowLogs'), '包含日志展开客户端方法 __dshShowLogs');
-  assert(html.includes('<svg') && html.includes('DSH Web'), '包含品牌 SVG 矢量图标与应用标题');
+  assert(html.includes('<svg') && html.includes('DeepSeek Harness') && !html.includes('DSH Web'), '包含应用图标 SVG 与 DeepSeek Harness 标题');
   assert(html.includes('v1.7.1 · 内核 v0.1.5-rc.1'), '正确渲染外壳与内核版本');
 
   const dataUrl = splashDataUrl({ version: '1.7.1' });
   assert(dataUrl.startsWith('data:text/html;charset=utf-8,'), 'splashDataUrl 格式为标准 data:text/html');
-  assert(dataUrl.includes(encodeURIComponent('DSH Web')), 'splashDataUrl 正确 URL 编码页面内容');
+  assert(dataUrl.includes(encodeURIComponent('DeepSeek Harness')), 'splashDataUrl 正确 URL 编码页面内容');
 }
 
 console.log('\n=== Runner (runner.js) 启动优化测试 ===');
