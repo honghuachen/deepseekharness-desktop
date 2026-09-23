@@ -60,7 +60,10 @@ function probePort(port, host = '127.0.0.1') {
 
 function createRunner({ nodeBin, paths, log = () => {} }) {
   let child = null;
-  let stopping = false;
+  /** 由 stop() 主动结束的子进程：其退出不算"意外退出" */
+  const intentionallyStopped = new WeakSet();
+  /** 已就绪（start 成功返回）的子进程：启动期退出由 start() 自己抛错处理，不重复通知 */
+  const readyChildren = new WeakSet();
   const exitListeners = new Set();
 
   function emitExit(info) {
@@ -91,8 +94,9 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
     const nodeDir = path.dirname(nodeBin);
     const pathSep = process.platform === 'win32' ? ';' : ':';
 
-    // 启用 Node 22+ 原生 V8 字节码持久化编译缓存，使大依赖项（如 Cordis、各大插件、onnxruntime 等）冷启动解析速度大幅提升
-    const compileCacheDir = paths?.rootDir ? path.join(paths.rootDir, 'cache', 'node-compile-cache') : null;
+    // 启用 Node 22+ 原生 V8 字节码持久化编译缓存，使大依赖项（如 Cordis、各大插件、onnxruntime 等）冷启动解析速度大幅提升。
+    // 注意不能放 rootDir/cache：macOS 大小写不敏感，会落进 Chromium 自己的 HTTP 缓存目录 Cache/ 里。
+    const compileCacheDir = paths?.rootDir ? path.join(paths.rootDir, 'node-compile-cache') : null;
     if (compileCacheDir) {
       try {
         fsSync.mkdirSync(compileCacheDir, { recursive: true });
@@ -132,11 +136,19 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
     child.stderr.on('data', (c) => String(c).split(/\r?\n/).filter(Boolean).forEach((l) => log(`${prefix} ${l}`)));
 
     let earlyExit = null;
-    child.on('exit', (code, signal) => {
+    const proc = child;
+    proc.on('exit', (code, signal) => {
       earlyExit = { code, signal };
-      child = null;
-      emitExit({ code, signal, url, port: picked.port });
+      // 只清理自己：stop() 超时强杀后可能已有新子进程接替
+      if (child === proc) child = null;
+      if (readyChildren.has(proc) && !intentionallyStopped.has(proc)) {
+        emitExit({ code, signal, url, port: picked.port });
+      }
     });
+    const ready = (result) => {
+      readyChildren.add(proc);
+      return result;
+    };
 
     // 就绪判定：进程存活且端口可连接
     const deadline = Date.now() + (isFirstBoot ? READY_TIMEOUT_FIRST_MS : READY_TIMEOUT_MS);
@@ -149,7 +161,7 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
       // 已拿到官方带 token 地址，立即返回
       if (printedUrl) {
         log('[runner] 官方 Web 服务已输出授权地址，就绪');
-        return { url: printedUrl, port: picked.port };
+        return ready({ url: printedUrl, port: picked.port });
       }
 
       if (!portReady) {
@@ -173,17 +185,17 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
         };
       });
     }
-    await stop();
     // 超时前最后检查一次 printedUrl（可能在最后 poll 时到达）
     if (printedUrl) {
       log('[runner] 官方 Web 服务已输出授权地址（超时前捕获），就绪');
-      return { url: printedUrl, port: picked.port };
+      return ready({ url: printedUrl, port: picked.port });
     }
     if (portReady) {
       // 端口就绪但始终没有输出 token（旧版无鉴权内核）
       log('[runner] 官方 Web 服务已就绪（无鉴权旧版），使用裸地址');
-      return { url, port: picked.port };
+      return ready({ url, port: picked.port });
     }
+    await stop();
     throw new Error('等待服务就绪超时');
   }
 
@@ -196,8 +208,8 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
 
   async function stop() {
     if (!child) return;
-    stopping = true;
     const c = child;
+    intentionallyStopped.add(c);
     child = null;
     await new Promise((resolve) => {
       const killTimer = setTimeout(() => {
@@ -210,7 +222,6 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
       });
       gracefulKill(c.pid);
     });
-    stopping = false;
   }
 
   /** Windows 用 taskkill 结束整棵进程树；类 unix 杀负 pid 进程组 */

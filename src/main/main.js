@@ -65,6 +65,7 @@ let runner;
 let statusWin;
 let mainWindow = null;
 let isSplashActive = false;
+let appPageLoadedOnce = false;
 let updateMonitor = null;
 let activeVersion = null;
 let activePort = DEFAULT_PORT;
@@ -317,6 +318,10 @@ function createMainWindow(url) {
 
   // 页面加载完成后同步一次更新状态（仅在非 Splash 页面执行）
   mainWindow.webContents.on('did-finish-load', () => {
+    if (!isSplashActive && !appPageLoadedOnce) {
+      appPageLoadedOnce = true;
+      logLine(`[perf] 官方页面加载完成 +${Math.round(performance.now())}ms`);
+    }
     if (!isSplashActive && updateMonitor && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('update:status-changed', updateMonitor.getStatus());
     }
@@ -419,6 +424,8 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
   updater = createUpdater({ nodeBin, pnpmCjs: pnpmCjsPath(), paths, log: logLine });
   kernelSwitcher = createKernelSwitcher({ updater, settings, paths, saveSettings, log: logLine });
   runner = createRunner({ nodeBin, paths, log: logLine });
+  // 仅在已就绪的内核意外退出时触发（stop() 主动停止与启动期失败都不会通知）
+  runner.onExit(handleServerExit);
 
   let installed;
   if (settings.pinnedKernelVersion) {
@@ -492,15 +499,17 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
   statusWin?.setTitle(`DSH Web v${app.getVersion()} · 内核 v${activeVersion}`);
   statusText(`启动官方 Web 服务（v${activeVersion}）…`);
 
-  // setupTaskBadge 启动后台监听，不阻塞核心服务拉起
-  setupTaskBadge(dshHome);
-
   const { url, port } = await runner.start(activeVersion, settings.port, {
     isFirstBoot: isFirstBootOfApp,
     envOverride: { DSH_HOME: dshHome },
   });
   activePort = port;
+  logLine(`[perf] 内核就绪 +${Math.round(performance.now())}ms`);
   navigateToApp(url);
+
+  // 角标基线要读取并解析全部会话文件（可达数十 MB），放在内核就绪、页面开始加载之后，
+  // 避免在主进程里与内核冷启动、官方页面首屏争抢 CPU/IO。
+  setTimeout(() => setupTaskBadge(dshHome), 1500);
 
   if (!updateMonitor) {
     updateMonitor = createUpdateMonitor({
@@ -527,10 +536,13 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
   // 插件更新以前只会在插件管理器点击“检查全部更新”时访问 npm/GitHub；
   // 因此重启后的监测器只能读取旧缓存，永远发现不了刚发布的新版。服务和主窗口
   // 就绪后在后台检查一次，不阻塞应用启动；完成后立即让更新监测器读取新缓存。
-  logLine('[plugins] 启动后台检查第三方插件更新…');
-  checkPluginUpdates(dshHome, { log: logLine })
-    .then(() => updateMonitor?.checkNow())
-    .catch((err) => logLine(`[plugins] 启动后台检查第三方插件更新失败：${err.message}`));
+  // 延后几秒再查，让出官方页面首屏加载的时间窗
+  setTimeout(() => {
+    logLine('[plugins] 启动后台检查第三方插件更新…');
+    checkPluginUpdates(dshHome, { log: logLine })
+      .then(() => updateMonitor?.checkNow())
+      .catch((err) => logLine(`[plugins] 启动后台检查第三方插件更新失败：${err.message}`));
+  }, 3000);
 
   // 开发诊断：DSH_WEB_DEV_PM=1 时自动打开插件管理器
   if (process.env.DSH_WEB_DEV_PM) {
@@ -597,9 +609,10 @@ function handleServerExit({ code, signal }) {
     const delay = 2000 * restartAttempts;
     setTimeout(async () => {
       try {
-        const { url } = await runner.start(activeVersion, settings.port, {
+        const { url, port } = await runner.start(activeVersion, settings.port, {
           envOverride: { DSH_HOME: dshHome },
         });
+        activePort = port;
         restartAttempts = 0;
         navigateToApp(url);
         logLine('[runner] 重启成功');
@@ -989,6 +1002,7 @@ app.whenReady().then(async () => {
   paths = makePaths(dataRoot);
   logger = createLogger(paths.logsDir);
   settings = loadSettings(paths);
+  logLine(`[perf] app ready +${Math.round(performance.now())}ms`);
   buildMenu();
 
   ipcMain.on('app:relaunch', () => {
