@@ -577,8 +577,14 @@ function renderKernelCard() {
     ? `<div class="error-box">切换失败：${esc(switchError)}</div>`
     : '';
   const logHtml = switching && switching.logs.length
-    ? `<div class="log-panel">${switching.logs.map(esc).join('\n')}</div>`
+    ? `<div class="log-panel" id="kernelLogPanel">${switching.logs.map(esc).join('\n')}</div>`
     : '';
+  const prevLogPanel = $('#kernelLogPanel');
+  const wasAtBottom = prevLogPanel
+    ? (prevLogPanel.scrollHeight - prevLogPanel.scrollTop - prevLogPanel.clientHeight < 30)
+    : true;
+  const prevScrollTop = prevLogPanel ? prevLogPanel.scrollTop : null;
+
   $('#kernelCard').innerHTML = `
     <h2>内核（@deepseek-ai/dsh）</h2>
     <div class="kernel-header">${kernelStatusLine()}</div>
@@ -587,6 +593,15 @@ function renderKernelCard() {
     ${logHtml}
   `;
   $('#kernelRetry')?.addEventListener('click', refresh);
+
+  const newLogPanel = $('#kernelLogPanel');
+  if (newLogPanel) {
+    if (wasAtBottom) {
+      newLogPanel.scrollTop = newLogPanel.scrollHeight;
+    } else if (prevScrollTop !== null) {
+      newLogPanel.scrollTop = prevScrollTop;
+    }
+  }
 }
 
 function render() {
@@ -725,7 +740,17 @@ window.updateAPI.onInstallLog((line) => {
   if (!switching) return;
   switching.logs.push(line);
   if (switching.logs.length > 200) switching.logs.splice(0, switching.logs.length - 200);
-  renderKernelCard();
+
+  const panel = $('#kernelLogPanel');
+  if (panel) {
+    const wasAtBottom = (panel.scrollHeight - panel.scrollTop - panel.clientHeight < 30);
+    panel.textContent = switching.logs.join('\n');
+    if (wasAtBottom) {
+      panel.scrollTop = panel.scrollHeight;
+    }
+  } else {
+    renderKernelCard();
+  }
 });
 
 window.updateAPI.onShellProgress((percent) => {

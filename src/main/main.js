@@ -779,6 +779,69 @@ ipcMain.handle('update:get-status', async () => {
   return updateMonitor?.getStatus() || { hasUpdate: false };
 });
 
+// ─────────────────────────── 启动故障应急恢复 IPC ───────────────────────────
+
+ipcMain.handle('emergency:disable-plugin', async (_event, { profile = 'web', pluginName }) => {
+  if (!pluginName) return { ok: false, error: '缺少插件名称' };
+  try {
+    const { togglePluginBundle } = require('./plugin-guard');
+    const home = resolveDshHome();
+    const profileDir = path.join(home, 'profiles', profile);
+    logLine(`[emergency] 正在停用故障插件：${pluginName} (profile=${profile})`);
+    await togglePluginBundle(profileDir, pluginName, false);
+    await restartDshService();
+    return { ok: true };
+  } catch (err) {
+    logLine(`[emergency] 停用插件 ${pluginName} 失败：${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('emergency:disable-all', async (_event, { profile = 'web', pluginNames = [] }) => {
+  if (!Array.isArray(pluginNames) || pluginNames.length === 0) {
+    return { ok: false, error: '未指定需要停用的插件' };
+  }
+  try {
+    const { togglePluginBundle } = require('./plugin-guard');
+    const home = resolveDshHome();
+    const profileDir = path.join(home, 'profiles', profile);
+    logLine(`[emergency] 正在一键批量停用故障插件：${pluginNames.join(', ')} (profile=${profile})`);
+    for (const name of pluginNames) {
+      try {
+        await togglePluginBundle(profileDir, name, false);
+      } catch (err) {
+        logLine(`[emergency] 停用 ${name} 警告：${err.message}`);
+      }
+    }
+    await restartDshService();
+    return { ok: true };
+  } catch (err) {
+    logLine(`[emergency] 一键停用故障插件失败：${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('emergency:remove-plugin', async (_event, { profile = 'web', pluginName }) => {
+  if (!pluginName) return { ok: false, error: '缺少插件名称' };
+  try {
+    const { removePluginsFromProfile } = require('./plugin-guard');
+    const home = resolveDshHome();
+    const profileDir = path.join(home, 'profiles', profile);
+    const nodeBin = (await resolveNode()) ?? 'node';
+    logLine(`[emergency] 正在卸载删除故障插件：${pluginName} (profile=${profile})`);
+    await removePluginsFromProfile(profileDir, [pluginName], {
+      nodeBin,
+      pnpmCjs: pnpmCjsPath(),
+      log: logLine,
+    });
+    await restartDshService();
+    return { ok: true };
+  } catch (err) {
+    logLine(`[emergency] 删除插件 ${pluginName} 失败：${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
+
 // ─────────────────────────── 菜单 ───────────────────────────
 
 function buildMenu() {
