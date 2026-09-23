@@ -128,4 +128,113 @@ await t('连续停用多个插件', async () => {
   assert.ok(updated.dsh.profile.disabledBundles.includes('@chenhw7/dsh-memory'));
 });
 
+// 3. 测试通过子插件名称（如 @opencode2dsh/dsh-plugin）关联并停用/删除父 Bundle（如 opencode2dsh）
+await t('通过子插件名 @opencode2dsh/dsh-plugin 停用所属 Bundle opencode2dsh', async () => {
+  const dir = makeTmpProfileDir();
+  const pkg = {
+    name: 'profile-web',
+    dependencies: {
+      opencode2dsh: 'github:FishBottle7/opencode2dsh',
+    },
+    dsh: {
+      profile: {
+        bundles: ['@deepseek-ai/dsh-base', 'opencode2dsh'],
+        disabledBundles: [],
+      },
+    },
+  };
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2));
+
+  // 模拟 node_modules/opencode2dsh
+  const nmBundleDir = path.join(dir, 'node_modules', 'opencode2dsh');
+  fs.mkdirSync(nmBundleDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(nmBundleDir, 'package.json'),
+    JSON.stringify({
+      name: 'opencode2dsh',
+      dependencies: { '@opencode2dsh/dsh-plugin': '^0.2.0' },
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }, null, 2)
+  );
+  fs.writeFileSync(
+    path.join(nmBundleDir, 'cordis.patch.yml'),
+    '- insert:\n    - id: @opencode2dsh/dsh-plugin\n      name: @opencode2dsh/dsh-plugin\n'
+  );
+
+  // 触发停用
+  await togglePluginBundle(dir, '@opencode2dsh/dsh-plugin', false);
+
+  const updated = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  assert.ok(!updated.dsh.profile.bundles.includes('opencode2dsh'), 'opencode2dsh 应从 bundles 中剔除');
+  assert.ok(updated.dsh.profile.disabledBundles.includes('opencode2dsh'), 'opencode2dsh 应加入 disabledBundles');
+  assert.ok(updated.dsh.profile.disabledBundles.includes('@opencode2dsh/dsh-plugin'), '@opencode2dsh/dsh-plugin 应加入 disabledBundles');
+});
+
+await t('通过子插件名 @opencode2dsh/dsh-plugin 彻底删除所属 Bundle opencode2dsh', async () => {
+  const dir = makeTmpProfileDir();
+  const pkg = {
+    name: 'profile-web',
+    dependencies: {
+      opencode2dsh: 'github:FishBottle7/opencode2dsh',
+    },
+    dsh: {
+      profile: {
+        bundles: ['@deepseek-ai/dsh-base', 'opencode2dsh'],
+        disabledBundles: [],
+      },
+    },
+  };
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2));
+
+  // 模拟 node_modules/opencode2dsh
+  const nmBundleDir = path.join(dir, 'node_modules', 'opencode2dsh');
+  fs.mkdirSync(nmBundleDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(nmBundleDir, 'package.json'),
+    JSON.stringify({
+      name: 'opencode2dsh',
+      dependencies: { '@opencode2dsh/dsh-plugin': '^0.2.0' },
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }, null, 2)
+  );
+  fs.writeFileSync(
+    path.join(nmBundleDir, 'cordis.patch.yml'),
+    '- insert:\n    - id: @opencode2dsh/dsh-plugin\n      name: @opencode2dsh/dsh-plugin\n'
+  );
+
+  // 触发删除
+  const res = await removePluginsFromProfile(dir, ['@opencode2dsh/dsh-plugin'], {});
+  assert.ok(res.removed.length > 0, '应该成功移除项');
+
+  const updated = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  assert.ok(!updated.dependencies?.opencode2dsh, 'dependencies 中应清除 opencode2dsh');
+  assert.ok(!updated.dsh.profile.bundles.includes('opencode2dsh'), 'bundles 中应清除 opencode2dsh');
+});
+
+await t('在 node_modules 缺失时通过启发式关联识别并停用父包', async () => {
+  const dir = makeTmpProfileDir();
+  const pkg = {
+    name: 'profile-web',
+    dependencies: {
+      opencode2dsh: 'github:FishBottle7/opencode2dsh',
+    },
+    dsh: {
+      profile: {
+        bundles: ['@deepseek-ai/dsh-base', 'opencode2dsh'],
+        disabledBundles: [],
+      },
+    },
+  };
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2));
+
+  // 注意：此处不建立 node_modules
+  await togglePluginBundle(dir, '@opencode2dsh/dsh-plugin', false);
+
+  const updated = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  assert.ok(!updated.dsh.profile.bundles.includes('opencode2dsh'), '即便无 node_modules 也应剔除 opencode2dsh');
+  assert.ok(updated.dsh.profile.disabledBundles.includes('opencode2dsh'), '应将 opencode2dsh 加入 disabledBundles');
+});
+
 console.log(`\n🎉 全部 ${passed} 个应急恢复测试通过！`);
+
+

@@ -855,11 +855,16 @@ ipcMain.handle('emergency:disable-plugin', async (_event, { profile = 'web', plu
     const home = resolveDshHome();
     const profileDir = path.join(home, 'profiles', profile);
     logLine(`[emergency] 正在停用故障插件：${pluginName} (profile=${profile})`);
+    // 关键：修改配置前优先停止运行中的 runner，避免 Windows 进程占用文件与热重载交叉竞态
+    if (runner?.isRunning()) {
+      await runner.stop().catch(() => {});
+    }
     await togglePluginBundle(profileDir, pluginName, false);
     await restartDshService();
     return { ok: true };
   } catch (err) {
     logLine(`[emergency] 停用插件 ${pluginName} 失败：${err.message}`);
+    restartDshService().catch(() => {});
     return { ok: false, error: err.message };
   }
 });
@@ -873,6 +878,9 @@ ipcMain.handle('emergency:disable-all', async (_event, { profile = 'web', plugin
     const home = resolveDshHome();
     const profileDir = path.join(home, 'profiles', profile);
     logLine(`[emergency] 正在一键批量停用故障插件：${pluginNames.join(', ')} (profile=${profile})`);
+    if (runner?.isRunning()) {
+      await runner.stop().catch(() => {});
+    }
     for (const name of pluginNames) {
       try {
         await togglePluginBundle(profileDir, name, false);
@@ -884,6 +892,7 @@ ipcMain.handle('emergency:disable-all', async (_event, { profile = 'web', plugin
     return { ok: true };
   } catch (err) {
     logLine(`[emergency] 一键停用故障插件失败：${err.message}`);
+    restartDshService().catch(() => {});
     return { ok: false, error: err.message };
   }
 });
@@ -896,6 +905,10 @@ ipcMain.handle('emergency:remove-plugin', async (_event, { profile = 'web', plug
     const profileDir = path.join(home, 'profiles', profile);
     const nodeBin = (await resolveNode()) ?? 'node';
     logLine(`[emergency] 正在卸载删除故障插件：${pluginName} (profile=${profile})`);
+    // 关键：在操作 node_modules 与执行 pnpm 前先停止 runner，彻底避免 Windows 文件句柄占用导致 EBUSY/EPERM 异常
+    if (runner?.isRunning()) {
+      await runner.stop().catch(() => {});
+    }
     await removePluginsFromProfile(profileDir, [pluginName], {
       nodeBin,
       pnpmCjs: pnpmCjsPath(),
@@ -905,6 +918,32 @@ ipcMain.handle('emergency:remove-plugin', async (_event, { profile = 'web', plug
     return { ok: true };
   } catch (err) {
     logLine(`[emergency] 删除插件 ${pluginName} 失败：${err.message}`);
+    restartDshService().catch(() => {});
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('emergency:reset-profile', async (_event, { profile = 'web' } = {}) => {
+  try {
+    const { sanitizeProfile } = require('./plugin-guard');
+    const home = resolveDshHome();
+    const profileDir = path.join(home, 'profiles', profile);
+    const nodeBin = (await resolveNode()) ?? 'node';
+    logLine(`[emergency] 正在恢复纯净官方配置（移除全部第三方插件） (profile=${profile})`);
+    if (runner?.isRunning()) {
+      await runner.stop().catch(() => {});
+    }
+    const { removed } = await sanitizeProfile(profileDir, {
+      nodeBin,
+      pnpmCjs: pnpmCjsPath(),
+      log: logLine,
+    });
+    logLine(`[emergency] 纯净配置恢复完成，已清除：${removed.join('、') || '无'}`);
+    await restartDshService();
+    return { ok: true, removed };
+  } catch (err) {
+    logLine(`[emergency] 恢复纯净官方配置失败：${err.message}`);
+    restartDshService().catch(() => {});
     return { ok: false, error: err.message };
   }
 });

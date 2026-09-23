@@ -172,6 +172,136 @@ function isBundlePackage(profileDir, pkgName) {
 }
 
 /**
+ * 递归收集某个已安装包/Bundle引入的全部子插件和依赖项
+ */
+function collectSubPlugins(profileDir, rootPkg, outSet) {
+  const nmPkgPath = path.join(profileDir, 'node_modules', ...rootPkg.split('/'), 'package.json');
+  if (fsSync.existsSync(nmPkgPath)) {
+    const nmPkg = readJson(nmPkgPath);
+    if (nmPkg) {
+      for (const d of Object.keys(nmPkg.dependencies || {})) {
+        outSet.add(d);
+      }
+      const patchRel = nmPkg.dsh?.bundle?.patch || 'cordis.patch.yml';
+      const patchFile = path.resolve(path.dirname(nmPkgPath), patchRel);
+      if (fsSync.existsSync(patchFile)) {
+        const patchContent = fsSync.readFileSync(patchFile, 'utf8');
+        for (const ins of parsePatchInserts(patchContent)) {
+          if (ins.name) outSet.add(ins.name);
+          if (ins.id) outSet.add(ins.id);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * 解析与某个插件标识相关联的所有包名、Bundle名与插入块标识（支持双向解析）。
+ * 场景：
+ *   1. 用户在拦截界面看到失败的是子插件名称（如 @opencode2dsh/dsh-plugin），
+ *      但实际安装的是外层 Bundle 包装包（如 opencode2dsh）。
+ *   2. 用户操作的是外层包名（如 opencode2dsh），需要同时联动清理其声明的 insert 插件名。
+ * @param {string} profileDir profile 目录绝对路径
+ * @param {string} pluginName 插件名称 / 包名 / 标识
+ * @returns {Set<string>} 所有相关联的名称集合
+ */
+function findRelatedPluginPackages(profileDir, pluginName) {
+  const result = new Set();
+  if (!pluginName || typeof pluginName !== 'string') return result;
+  const target = pluginName.trim();
+  result.add(target);
+
+  const pkgFile = path.join(profileDir, 'package.json');
+  const pkg = readJson(pkgFile);
+  if (!pkg) return result;
+
+  const directDeps = Object.keys(pkg.dependencies || {});
+  const directBundles = (pkg.dsh?.profile?.bundles || []).map(String);
+  const directDisabled = (pkg.dsh?.profile?.disabledBundles || []).map(String);
+  const allCandidateRoots = new Set([...directDeps, ...directBundles, ...directDisabled]);
+
+  // 1. 如果 target 本身是 candidateRoot，向下收集其作为 Bundle/包装包引入的子插件
+  if (allCandidateRoots.has(target)) {
+    collectSubPlugins(profileDir, target, result);
+  }
+
+  // 2. 向上查找：检查 candidateRoots 中是否有某个包包含或引入了 target
+  for (const rootPkg of allCandidateRoots) {
+    if (rootPkg === target) continue;
+
+    // 检查 node_modules/<rootPkg>
+    const nmPkgPath = path.join(profileDir, 'node_modules', ...rootPkg.split('/'), 'package.json');
+    if (fsSync.existsSync(nmPkgPath)) {
+      const nmPkg = readJson(nmPkgPath);
+      if (nmPkg) {
+        // a) 真实 package.json name 与 target 相同
+        if (nmPkg.name === target) {
+          result.add(rootPkg);
+        }
+        // b) 依赖项中包含了 target
+        const deps = {
+          ...nmPkg.dependencies,
+          ...nmPkg.devDependencies,
+          ...nmPkg.peerDependencies,
+        };
+        if (deps[target]) {
+          result.add(rootPkg);
+        }
+        // c) patch 文件中的 insert 块包含了 target
+        const patchRel = nmPkg.dsh?.bundle?.patch || 'cordis.patch.yml';
+        const patchFile = path.resolve(path.dirname(nmPkgPath), patchRel);
+        if (fsSync.existsSync(patchFile)) {
+          const patchContent = fsSync.readFileSync(patchFile, 'utf8');
+          const inserts = parsePatchInserts(patchContent);
+          if (inserts.some((ins) => ins.name === target || ins.id === target)) {
+            result.add(rootPkg);
+          }
+        }
+      }
+    } else {
+      // 容错兜底（node_modules 缺失或已清理）：基于作用域或包名前后缀的启发式关联
+      // 例如 rootPkg 为 opencode2dsh，target 为 @opencode2dsh/dsh-plugin
+      const cleanPlugin = target.replace(/^@/, '');
+      const [scope, subName] = cleanPlugin.includes('/') ? cleanPlugin.split('/') : [cleanPlugin, ''];
+      const cleanRoot = rootPkg.replace(/^@/, '').split('/')[0];
+      if (
+        cleanRoot === scope ||
+        cleanRoot === subName ||
+        (cleanRoot && scope && (cleanRoot.includes(scope) || scope.includes(cleanRoot)))
+      ) {
+        result.add(rootPkg);
+      }
+    }
+  }
+
+  // 3. 跨 node_modules 启发式：若 target 包含 scope 且根依赖有同名候选
+  if (!allCandidateRoots.has(target)) {
+    for (const rootPkg of allCandidateRoots) {
+      const cleanRoot = rootPkg.replace(/^@/, '').split('/')[0];
+      const cleanPlugin = target.replace(/^@/, '').split('/')[0];
+      if (cleanRoot && cleanPlugin && (cleanRoot === cleanPlugin || cleanRoot.includes(cleanPlugin) || cleanPlugin.includes(cleanRoot))) {
+        result.add(rootPkg);
+      }
+    }
+  }
+
+  // 4. 检查 profileDir 自身的 cordis.patch.yml 中的同名/同 id 块
+  const localPatch = path.join(profileDir, 'cordis.patch.yml');
+  if (fsSync.existsSync(localPatch)) {
+    const patchContent = fsSync.readFileSync(localPatch, 'utf8');
+    const inserts = parsePatchInserts(patchContent);
+    for (const ins of inserts) {
+      if (ins.name === target || ins.id === target) {
+        if (ins.name) result.add(ins.name);
+        if (ins.id) result.add(ins.id);
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
  * 解析 pnpm 安装/更新过程中打印的进度行，例如：
  *   "Progress: resolved 175, reused 53, downloaded 8, added 10"
  *   "Progress: resolved 175, reused 53, downloaded 8, added 10, done"
@@ -1250,20 +1380,33 @@ async function removePluginsFromProfile(profileDir, names, { nodeBin, pnpmCjs, l
   const pkg = readJson(pkgFile);
   if (!pkg || names.length === 0) return { removed: [], reconciled: 'none' };
 
-  const want = new Set(names);
+  // 扩展所有关联包名（支持直接包名、bundle 父包、子插件名双向识别）
+  const want = new Set();
+  for (const n of names) {
+    if (!n) continue;
+    want.add(n);
+    const related = findRelatedPluginPackages(profileDir, n);
+    for (const r of related) want.add(r);
+  }
+
   const backupDir = path.join(profileDir, `.sanitized-backup-${Date.now()}`);
   await fsPromises.mkdir(backupDir, { recursive: true });
 
-  // 1) 重写 package.json：剔除选中项（其余字段原样保留）
+  // 1) 重写 package.json：剔除选中项与所有关联项
   await fsPromises.copyFile(pkgFile, path.join(backupDir, 'package.json'));
   const removedFromDeps = Object.keys(pkg.dependencies ?? {}).filter((n) => want.has(n));
   for (const n of removedFromDeps) delete pkg.dependencies[n];
   const beforeBundles = pkg.dsh?.profile?.bundles ?? [];
   const removedFromBundles = beforeBundles.filter((b) => want.has(b));
-  if (pkg.dsh?.profile) pkg.dsh.profile.bundles = beforeBundles.filter((b) => !want.has(b));
+  if (pkg.dsh?.profile) {
+    pkg.dsh.profile.bundles = beforeBundles.filter((b) => !want.has(b));
+    if (Array.isArray(pkg.dsh.profile.disabledBundles)) {
+      pkg.dsh.profile.disabledBundles = pkg.dsh.profile.disabledBundles.filter((b) => !want.has(b));
+    }
+  }
   await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
 
-  // 2) 补丁层：剔除 name 命中的插入块
+  // 2) 补丁层：剔除 name/id 命中的插入块
   const patchFile = path.join(profileDir, 'cordis.patch.yml');
   if (fsSync.existsSync(patchFile)) {
     const original = await fsPromises.readFile(patchFile, 'utf8');
@@ -1305,8 +1448,8 @@ async function removePluginsFromProfile(profileDir, names, { nodeBin, pnpmCjs, l
     reconciled = 'reinstall';
   }
 
-  const removed = [...new Set([...removedFromDeps, ...removedFromBundles])].filter((n) => want.has(n));
-  log(`[guard] ${path.basename(profileDir)}: 已移除 ${removed.length} 项（备份 ${path.basename(backupDir)}）`);
+  const removed = [...new Set([...removedFromDeps, ...removedFromBundles, ...names])].filter((n) => want.has(n));
+  log(`[guard] ${path.basename(profileDir)}: 已移除 ${removed.length} 项（${removed.join(', ')}，备份 ${path.basename(backupDir)}）`);
   return { removed, reconciled };
 }
 
@@ -1687,39 +1830,42 @@ async function togglePluginBundle(profileDir, pluginName, enable = true) {
 
   pkg.dsh = pkg.dsh || {};
   pkg.dsh.profile = pkg.dsh.profile || {};
-  const bundles = (pkg.dsh.profile.bundles || []).map(String);
-  const disabledBundles = (pkg.dsh.profile.disabledBundles || []).map(String);
-  const isBundle = isBundlePackage(profileDir, pluginName);
+  let bundles = (pkg.dsh.profile.bundles || []).map(String);
+  let disabledBundles = (pkg.dsh.profile.disabledBundles || []).map(String);
 
+  // 解析与此插件相关联的所有包名（解决 bundle 子插件如 @opencode2dsh/dsh-plugin 与外层 opencode2dsh 的映射）
+  const relatedNames = findRelatedPluginPackages(profileDir, pluginName);
   let patchContent = fsSync.existsSync(patchFile) ? fsSync.readFileSync(patchFile, 'utf8') : '';
 
-  if (isBundle) {
-    if (enable) {
-      if (!bundles.includes(pluginName)) bundles.push(pluginName);
-      pkg.dsh.profile.disabledBundles = disabledBundles.filter((b) => b !== pluginName);
-      pkg.dsh.profile.bundles = [...new Set(bundles)];
-    } else {
-      if (!disabledBundles.includes(pluginName)) disabledBundles.push(pluginName);
-      pkg.dsh.profile.disabledBundles = [...new Set(disabledBundles)];
-      pkg.dsh.profile.bundles = bundles.filter((b) => b !== pluginName);
+  if (enable) {
+    for (const name of relatedNames) {
+      disabledBundles = disabledBundles.filter((b) => b !== name);
+      if (isBundlePackage(profileDir, name)) {
+        if (!bundles.includes(name)) bundles.push(name);
+      } else {
+        bundles = bundles.filter((b) => b !== name);
+        patchContent = appendPatchInsert(patchContent, name);
+      }
     }
   } else {
-    // 非 bundle 插件：绝不能在 bundles 中，通过 cordis.patch.yml 挂载启用或移除停用
-    pkg.dsh.profile.bundles = bundles.filter((b) => b !== pluginName);
-    if (enable) {
-      patchContent = appendPatchInsert(patchContent, pluginName);
-      pkg.dsh.profile.disabledBundles = disabledBundles.filter((b) => b !== pluginName);
-      await fsPromises.writeFile(patchFile, patchContent);
-    } else {
-      patchContent = stripForeignInsertBlocks(patchContent, new Set([pluginName]));
-      if (!disabledBundles.includes(pluginName)) disabledBundles.push(pluginName);
-      pkg.dsh.profile.disabledBundles = [...new Set(disabledBundles)];
-      await fsPromises.writeFile(patchFile, patchContent);
+    // 停用：从 bundles 中移除所有相关名称，并在 disabledBundles 中记录它们，从 patchContent 中剥除
+    for (const name of relatedNames) {
+      bundles = bundles.filter((b) => b !== name);
+      if (!disabledBundles.includes(name)) {
+        disabledBundles.push(name);
+      }
     }
+    patchContent = stripForeignInsertBlocks(patchContent, relatedNames);
   }
 
+  pkg.dsh.profile.bundles = [...new Set(bundles)];
+  pkg.dsh.profile.disabledBundles = [...new Set(disabledBundles)];
+
+  if (fsSync.existsSync(patchFile) || !enable || patchContent.trim()) {
+    await fsPromises.writeFile(patchFile, patchContent);
+  }
   await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
-  return { ok: true, name: pluginName, enabled: enable, bundles: pkg.dsh.profile.bundles };
+  return { ok: true, name: pluginName, related: [...relatedNames], enabled: enable, bundles: pkg.dsh.profile.bundles };
 }
 
 module.exports = {
@@ -1729,6 +1875,7 @@ module.exports = {
   stripForeignInsertBlocks,
   appendPatchInsert,
   isBundlePackage,
+  findRelatedPluginPackages,
   removePluginsFromProfile,
   sanitizeProfile,
   installPluginToProfile,

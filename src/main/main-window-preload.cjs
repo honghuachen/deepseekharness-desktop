@@ -815,6 +815,9 @@ function renderEmergencyPanel(container, failedPlugins, fullRawText) {
         ` : ''}
       </div>
       <div class="dsh-em-footer-right">
+        <button class="dsh-em-btn dsh-em-btn-secondary" id="dshEmergencyResetAllBtn" title="清除全部第三方插件并恢复官方默认纯净配置" style="color: #ff6b6b; border-color: rgba(255, 107, 107, 0.35);">
+          🛡️ 恢复纯净配置
+        </button>
         <button class="dsh-em-btn dsh-em-btn-secondary" id="dshEmergencyOpenUpdateBtn">
           🔄 切回稳定内核版本
         </button>
@@ -849,6 +852,7 @@ function renderEmergencyPanel(container, failedPlugins, fullRawText) {
         try {
           const res = await ipcRenderer?.invoke('emergency:disable-plugin', { profile: 'web', pluginName: p.name });
           if (res && !res.ok) throw new Error(res.error || '停用失败');
+          disableBtn.textContent = '服务重启中…';
         } catch (e) {
           alert(`停用失败: ${e.message}`);
           disableBtn.innerHTML = originalText;
@@ -874,6 +878,7 @@ function renderEmergencyPanel(container, failedPlugins, fullRawText) {
         try {
           const res = await ipcRenderer?.invoke('emergency:remove-plugin', { profile: 'web', pluginName: p.name });
           if (res && !res.ok) throw new Error(res.error || '删除失败');
+          removeBtn.textContent = '服务重启中…';
         } catch (e) {
           alert(`删除失败: ${e.message}`);
           removeBtn.innerHTML = originalText;
@@ -898,9 +903,35 @@ function renderEmergencyPanel(container, failedPlugins, fullRawText) {
       try {
         const res = await ipcRenderer?.invoke('emergency:disable-all', { profile: 'web', pluginNames });
         if (res && !res.ok) throw new Error(res.error || '批量停用失败');
+        disableAllBtn.textContent = '服务重启中…';
       } catch (e) {
         alert(`恢复启动失败: ${e.message}`);
         disableAllBtn.innerHTML = originalText;
+        setAllButtonsDisabled(card, false);
+        isEmergencyHandling = false;
+      }
+    });
+  }
+
+  // 绑定一键恢复官方纯净配置按钮
+  const resetAllBtn = card.querySelector('#dshEmergencyResetAllBtn');
+  if (resetAllBtn) {
+    resetAllBtn.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (isEmergencyHandling) return;
+      if (!confirm('确定彻底清除当前所有的第三方插件并恢复官方默认纯净配置吗？\n此操作将确保应用核心服务能够立即成功启动。')) return;
+      const originalText = resetAllBtn.innerHTML;
+      resetAllBtn.textContent = '正在清理恢复…';
+      setAllButtonsDisabled(card, true);
+      isEmergencyHandling = true;
+      try {
+        const res = await ipcRenderer?.invoke('emergency:reset-profile', { profile: 'web' });
+        if (res && !res.ok) throw new Error(res.error || '恢复纯净配置失败');
+        resetAllBtn.textContent = '服务重启中…';
+      } catch (e) {
+        alert(`恢复纯净配置失败: ${e.message}`);
+        resetAllBtn.innerHTML = originalText;
         setAllButtonsDisabled(card, false);
         isEmergencyHandling = false;
       }
