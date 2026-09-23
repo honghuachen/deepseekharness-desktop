@@ -13,7 +13,7 @@ const path = require('node:path');
 const DSH_ENTRY = 'node_modules/@deepseek-ai/dsh/lib/bin.js';
 const READY_TIMEOUT_FIRST_MS = 150_000; // 首次启动（可能含 profile 初始化）
 const READY_TIMEOUT_MS = 45_000;
-const POLL_INTERVAL_MS = 150; // 加快轮询频率，降低就绪感知延迟
+const POLL_INTERVAL_MS = 100; // 加快轮询频率，降低就绪感知延迟
 
 /** 探测端口是否空闲 */
 function isPortFree(port, host = '127.0.0.1') {
@@ -90,11 +90,21 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
     log(`[runner] 启动 dsh web (${version}) @ ${url}`);
     const nodeDir = path.dirname(nodeBin);
     const pathSep = process.platform === 'win32' ? ';' : ':';
+
+    // 启用 Node 22+ 原生 V8 字节码持久化编译缓存，使大依赖项（如 Cordis、各大插件、onnxruntime 等）冷启动解析速度大幅提升
+    const compileCacheDir = paths?.rootDir ? path.join(paths.rootDir, 'cache', 'node-compile-cache') : null;
+    if (compileCacheDir) {
+      try {
+        fsSync.mkdirSync(compileCacheDir, { recursive: true });
+      } catch {}
+    }
+
     child = spawn(nodeBin, [entry, 'web', '--no-open', '--host', '127.0.0.1', '--port', String(picked.port)], {
       cwd: vdir,
       env: {
         ...process.env,
         PATH: nodeDir + pathSep + (process.env.PATH || ''),
+        ...(compileCacheDir ? { NODE_COMPILE_CACHE: compileCacheDir } : {}),
         ...envOverride,
       },
       detached: true, // 独立进程组，便于整体终止 cordis 派生的 worker
@@ -107,7 +117,9 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
     let printedUrl = null;
     let urlNotify = null;
     const captureUrl = (line) => {
-      const m = /^dsh web:\s+(\S+)/.exec(line.trim());
+      // 剥除终端 ANSI 控制符，防止日志格式带颜色等导致正则未匹配
+      const clean = line.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim();
+      const m = /(?:^|\s)dsh web:\s*(\S+)/.exec(clean);
       if (m) {
         printedUrl = m[1];
         if (urlNotify) {
@@ -153,7 +165,7 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
       // 端口未就绪时快速轮询，或直到 printedUrl 到来被 urlNotify 唤醒
       // eslint-disable-next-line no-await-in-loop
       await new Promise((r) => {
-        const waitMs = portReady ? 1000 : POLL_INTERVAL_MS;
+        const waitMs = portReady ? 400 : POLL_INTERVAL_MS;
         const timer = setTimeout(r, waitMs);
         urlNotify = () => {
           clearTimeout(timer);

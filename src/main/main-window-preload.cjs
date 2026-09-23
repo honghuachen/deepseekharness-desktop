@@ -984,6 +984,10 @@ function init() {
     ipcRenderer.on('update:status-changed', (_event, status) => {
       applyUpdateStatus(status);
     });
+
+    window.__dshRelaunch = () => {
+      ipcRenderer.send('app:relaunch');
+    };
   }
 }
 

@@ -10,7 +10,7 @@
  *   4. 就绪后在后台静默运行更新监测器，发现新版本通过侧边栏徽标与更新面板提示用户
  */
 
-const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, ipcMain, nativeTheme } = require('electron');
 const path = require('node:path');
 const fsSync = require('node:fs');
 const os = require('node:os');
@@ -41,6 +41,7 @@ const { openPluginManager, getPluginUpdatesSummary, checkPluginUpdates } = requi
 const { openAboutWindow } = require('./about-window');
 const { openTokenUsageWindow } = require('./token-usage/window');
 const { openUpdateWindow: openUpdateWindowImpl } = require('./update-window');
+const { splashDataUrl } = require('./splash');
 
 const execFileP = promisify(execFile);
 
@@ -63,6 +64,7 @@ let kernelSwitcher;
 let runner;
 let statusWin;
 let mainWindow = null;
+let isSplashActive = false;
 let updateMonitor = null;
 let activeVersion = null;
 let activePort = DEFAULT_PORT;
@@ -149,6 +151,12 @@ function logLine(text) {
 
 function statusText(text) {
   logLine(text);
+  if (mainWindow && !mainWindow.isDestroyed() && isSplashActive) {
+    const clean = String(text).replace(/[\r\n]+/g, ' ');
+    mainWindow.webContents
+      .executeJavaScript(`if (window.__dshUpdateStatus) window.__dshUpdateStatus(${JSON.stringify(clean)})`)
+      .catch(() => {});
+  }
   statusWin?.push(text);
 }
 
@@ -272,6 +280,17 @@ function ensureDirs() {
 // ─────────────────────────── 主窗口 ───────────────────────────
 
 function createMainWindow(url) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (url) {
+      isSplashActive = false;
+      mainWindow.loadURL(url).catch(() => {});
+    }
+    focusMainWindow();
+    return mainWindow;
+  }
+
+  isSplashActive = !url;
+  const isDark = nativeTheme?.shouldUseDarkColors ?? true;
   mainWindow = new BrowserWindow({
     width: 1360,
     height: 900,
@@ -279,7 +298,7 @@ function createMainWindow(url) {
     minHeight: 620,
     title: 'DSH Web',
     show: false,
-    backgroundColor: '#f6f7f9',
+    backgroundColor: isDark ? '#17181a' : '#f6f7f9',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -287,22 +306,29 @@ function createMainWindow(url) {
       preload: path.join(__dirname, 'main-window-preload.cjs'),
     },
   });
-  mainWindow.loadURL(url);
+
+  const initialUrl = url || splashDataUrl({ version: app.getVersion(), kernelVersion: activeVersion });
+  mainWindow.loadURL(initialUrl);
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     statusWin?.close();
   });
-  // 页面加载完成后同步一次更新状态
+
+  // 页面加载完成后同步一次更新状态（仅在非 Splash 页面执行）
   mainWindow.webContents.on('did-finish-load', () => {
-    if (updateMonitor && mainWindow && !mainWindow.isDestroyed()) {
+    if (!isSplashActive && updateMonitor && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('update:status-changed', updateMonitor.getStatus());
     }
   });
+
   // 用户查看窗口即视为已读：清空任务完成角标
   mainWindow.on('focus', () => clearBadge());
+
   // 开发诊断：DSH_WEB_DEV_SNAPSHOT=<路径> 时，页面加载完自动截窗保存
   if (process.env.DSH_WEB_DEV_SNAPSHOT || process.env.DSH_WEB_DEV_TEXTDUMP) {
-    mainWindow.webContents.once('did-finish-load', () => {
+    mainWindow.webContents.on('did-finish-load', () => {
+      if (isSplashActive) return;
       setTimeout(async () => {
         try {
           if (process.env.DSH_WEB_DEV_SNAPSHOT) {
@@ -323,9 +349,12 @@ function createMainWindow(url) {
       }, 4000);
     });
   }
+
   mainWindow.on('closed', () => {
     mainWindow = null;
+    isSplashActive = false;
   });
+
   // 官方页面的外链交给系统浏览器
   mainWindow.webContents.setWindowOpenHandler(({ url: target }) => {
     if (!target.startsWith(`http://127.0.0.1:${activePort}`)) {
@@ -333,6 +362,19 @@ function createMainWindow(url) {
       return { action: 'deny' };
     }
     return { action: 'allow' };
+  });
+
+  return mainWindow;
+}
+
+function navigateToApp(url) {
+  isSplashActive = false;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow(url);
+    return;
+  }
+  mainWindow.loadURL(url).catch((err) => {
+    logLine(`[main] loadURL 失败: ${err.message}`);
   });
 }
 
@@ -438,17 +480,27 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
   }
   const dshHome = resolveDshHome();
   await ensureOfficialProfile(dshHome);
-  setupTaskBadge(dshHome);
 
-  // 状态窗口标题同时带上容器与内核版本
+  // 状态窗口与主窗口启动屏标题同时带上容器与内核版本
+  if (mainWindow && !mainWindow.isDestroyed() && isSplashActive) {
+    mainWindow.webContents
+      .executeJavaScript(
+        `if (window.__dshUpdateStatus) window.__dshUpdateStatus("启动官方 Web 服务…", "v${app.getVersion()} · 内核 v${activeVersion}")`
+      )
+      .catch(() => {});
+  }
   statusWin?.setTitle(`DSH Web v${app.getVersion()} · 内核 v${activeVersion}`);
   statusText(`启动官方 Web 服务（v${activeVersion}）…`);
+
+  // setupTaskBadge 启动后台监听，不阻塞核心服务拉起
+  setupTaskBadge(dshHome);
+
   const { url, port } = await runner.start(activeVersion, settings.port, {
     isFirstBoot: isFirstBootOfApp,
     envOverride: { DSH_HOME: dshHome },
   });
   activePort = port;
-  createMainWindow(url);
+  navigateToApp(url);
 
   if (!updateMonitor) {
     updateMonitor = createUpdateMonitor({
@@ -507,12 +559,13 @@ function handleServerExit({ code, signal }) {
   if (appQuitting || !app.isReady()) return;
   logLine(`[runner] 服务意外退出 (code=${code} signal=${signal})`);
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.loadURL(
-      'data:text/html;charset=utf-8,' +
-        encodeURIComponent(
-          '<body style="font:15px -apple-system,sans-serif;display:grid;place-items:center;height:100vh;margin:0;color:#666">服务连接中断，正在重启…</body>',
-        ),
-    ).catch(() => {});
+    isSplashActive = true;
+    mainWindow
+      .loadURL(splashDataUrl({ version: app.getVersion(), kernelVersion: activeVersion }))
+      .then(() => {
+        statusText('服务连接中断，正在自动重启…');
+      })
+      .catch(() => {});
   }
   const attempt = async () => {
     const { hasSanitizeMarker } = require('./plugin-guard');
@@ -522,20 +575,21 @@ function handleServerExit({ code, signal }) {
     if (!hasSanitizeMarker(dshHome)) {
       try {
         await ensureOfficialProfile(dshHome, { force: true });
+        const { changed, removed } = await sanitizeProfile(path.join(dshHome, 'profiles', 'web'), {
+          log: logLine,
+        });
+        if (changed && removed.length) {
+          logLine(`[guard] 已清洗坏插件：${removed.join('、')}`);
+        }
       } catch (err) {
         logLine(`[guard] 清理失败：${err.message}`);
       }
-      restartAttempts = 0;
     }
-
     if (restartAttempts >= 3) {
       dialog.showMessageBox({
         type: 'error',
-        message: '官方服务反复崩溃，已停止自动重启',
-        detail:
-          '请查看日志（菜单：打开日志文件夹）。\n' +
-          '常见原因：profiles 中存在与当前版本不兼容的插件。\n' +
-          '可尝试菜单：DSH Web → 管理第三方插件…',
+        message: '官方 Web 服务多次异常退出',
+        detail: `已尝试重启 3 次均失败。\n最后退出状态：code=${code} signal=${signal}\n请通过菜单「查看运行日志」排查原因。`,
       });
       return;
     }
@@ -547,7 +601,7 @@ function handleServerExit({ code, signal }) {
           envOverride: { DSH_HOME: dshHome },
         });
         restartAttempts = 0;
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(url).catch(() => {});
+        navigateToApp(url);
         logLine('[runner] 重启成功');
       } catch (err) {
         logLine(`[runner] 重启失败：${err.message}`);
@@ -937,13 +991,23 @@ app.whenReady().then(async () => {
   settings = loadSettings(paths);
   buildMenu();
 
-  statusWin = createStatusWindow();
-  for (const line of logger.recentLines()) statusWin.push(line);
+  ipcMain.on('app:relaunch', () => {
+    app.relaunch();
+    app.exit(0);
+  });
+
+  // 毫秒级展示主窗口原生加载壳（<300ms 快速可见，彻底告别 520x320 小弹窗的等待与闪烁感）
+  createMainWindow();
 
   try {
     await bootstrap();
   } catch (err) {
     logLine(`启动失败：${err.stack || err}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents
+        .executeJavaScript(`if (window.__dshShowError) window.__dshShowError(${JSON.stringify(String(err.message || err))})`)
+        .catch(() => {});
+    }
     const { response } = await dialog.showMessageBox({
       type: 'error',
       message: 'DSH Web 启动失败',
@@ -965,8 +1029,14 @@ app.on('window-all-closed', () => {
 
 app.on('activate', async () => {
   clearBadge();
-  if (!mainWindow && runner?.isRunning()) {
-    createMainWindow(`http://127.0.0.1:${activePort}`);
+  if (!mainWindow) {
+    if (runner?.isRunning() && activePort) {
+      createMainWindow(`http://127.0.0.1:${activePort}`);
+    } else {
+      createMainWindow();
+    }
+  } else {
+    focusMainWindow();
   }
 });
 
