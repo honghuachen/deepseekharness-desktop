@@ -17,6 +17,14 @@ const { spawn } = require('node:child_process');
 const semver = require('semver');
 
 const OFFICIAL_PREFIX = '@deepseek-ai/';
+const CORE_OFFICIAL_PACKAGES = new Set([
+  '@deepseek-ai/dsh-base',
+  '@deepseek-ai/dsh-web-app',
+  '@deepseek-ai/dsh-storage',
+  '@deepseek-ai/dsh-storage-domain',
+  '@deepseek-ai/dsh-storage-json',
+  '@deepseek-ai/dsh-atomic-write',
+]);
 const CANONICAL_PKG = {
   name: 'dsh-profile-web',
   private: true,
@@ -26,6 +34,10 @@ const CANONICAL_PKG = {
 
 function isOfficial(name) {
   return String(name).startsWith(OFFICIAL_PREFIX);
+}
+
+function isOfficialCore(name) {
+  return CORE_OFFICIAL_PACKAGES.has(String(name));
 }
 
 function readJson(file) {
@@ -1828,6 +1840,10 @@ async function togglePluginBundle(profileDir, pluginName, enable = true) {
   const pkg = readJson(pkgFile);
   if (!pkg) throw new Error('profile 目录不存在或 package.json 无效');
 
+  if (!enable && isOfficialCore(pluginName)) {
+    return { ok: false, name: pluginName, error: '核心官方模块不可停用' };
+  }
+
   pkg.dsh = pkg.dsh || {};
   pkg.dsh.profile = pkg.dsh.profile || {};
   let bundles = (pkg.dsh.profile.bundles || []).map(String);
@@ -1850,6 +1866,7 @@ async function togglePluginBundle(profileDir, pluginName, enable = true) {
   } else {
     // 停用：从 bundles 中移除所有相关名称，并在 disabledBundles 中记录它们，从 patchContent 中剥除
     for (const name of relatedNames) {
+      if (isOfficialCore(name)) continue;
       bundles = bundles.filter((b) => b !== name);
       if (!disabledBundles.includes(name)) {
         disabledBundles.push(name);
@@ -1868,8 +1885,56 @@ async function togglePluginBundle(profileDir, pluginName, enable = true) {
   return { ok: true, name: pluginName, related: [...relatedNames], enabled: enable, bundles: pkg.dsh.profile.bundles };
 }
 
+/**
+ * 检查并清理 Profile 目录的卫生状态（防御性自愈）：
+ * 1. 官方包必须由运行时内核提供，若 profile/node_modules/@deepseek-ai 存在则移除，避免遮蔽新内核；
+ * 2. 移除 package.json dependencies 里被第三方插件误引入的核心官方包；
+ * 3. 移除 disabledBundles 中被误加入的核心官方包（如 @deepseek-ai/dsh-storage-domain）。
+ */
+async function cleanProfileHygiene(profileDir, { log = () => {} } = {}) {
+  let changed = false;
+  if (!profileDir || !fsSync.existsSync(profileDir)) return { cleaned: false };
+
+  const officialNmDir = path.join(profileDir, 'node_modules', '@deepseek-ai');
+  if (fsSync.existsSync(officialNmDir)) {
+    log(`[guard] 清理 profile 目录下的本地官方包残留: ${officialNmDir}`);
+    await fsPromises.rm(officialNmDir, { recursive: true, force: true }).catch(() => {});
+    changed = true;
+  }
+
+  const pkgFile = path.join(profileDir, 'package.json');
+  const pkg = readJson(pkgFile);
+  if (pkg) {
+    let pkgModified = false;
+    if (pkg.dependencies && typeof pkg.dependencies === 'object') {
+      for (const dep of Object.keys(pkg.dependencies)) {
+        if (isOfficialCore(dep)) {
+          delete pkg.dependencies[dep];
+          pkgModified = true;
+          log(`[guard] 从 dependencies 中清理误引入的官方核心包: ${dep}`);
+        }
+      }
+    }
+    if (Array.isArray(pkg.dsh?.profile?.disabledBundles)) {
+      const before = pkg.dsh.profile.disabledBundles.length;
+      pkg.dsh.profile.disabledBundles = pkg.dsh.profile.disabledBundles.filter((b) => !isOfficialCore(b));
+      if (pkg.dsh.profile.disabledBundles.length !== before) {
+        pkgModified = true;
+        log('[guard] 从 disabledBundles 中恢复被误禁用的官方核心模块');
+      }
+    }
+    if (pkgModified) {
+      await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
+      changed = true;
+    }
+  }
+  return { cleaned: changed };
+}
+
 module.exports = {
   isOfficial,
+  isOfficialCore,
+  cleanProfileHygiene,
   inventoryProfile,
   parsePatchInserts,
   stripForeignInsertBlocks,

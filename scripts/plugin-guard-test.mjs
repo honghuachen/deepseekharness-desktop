@@ -11,7 +11,14 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { inventoryProfile, removePluginsFromProfile, sanitizeProfile, togglePluginBundle } = require('../src/main/plugin-guard.js');
+const {
+  inventoryProfile,
+  removePluginsFromProfile,
+  sanitizeProfile,
+  togglePluginBundle,
+  cleanProfileHygiene,
+  isOfficialCore,
+} = require('../src/main/plugin-guard.js');
 
 let failed = false;
 const assert = (cond, msg) => {
@@ -94,6 +101,26 @@ const tb2 = await togglePluginBundle(profile, 'test-plugin', false);
 assert(tb2.ok && !tb2.bundles.includes('test-plugin'), 'togglePluginBundle: 成功从 bundle 停用');
 pkgTb = JSON.parse(await fs.readFile(path.join(profile, 'package.json'), 'utf8'));
 assert(!pkgTb.dsh.profile.bundles.includes('test-plugin'), 'package.json 已剔除 bundle');
+
+// ── 核心官方包防停用守卫 ──
+const tbCore = await togglePluginBundle(profile, '@deepseek-ai/dsh-storage-domain', false);
+assert(!tbCore.ok && tbCore.error.includes('核心官方模块不可停用'), '核心官方模块拒绝停用');
+pkgTb = JSON.parse(await fs.readFile(path.join(profile, 'package.json'), 'utf8'));
+assert(!pkgTb.dsh.profile.disabledBundles.includes('@deepseek-ai/dsh-storage-domain'), 'disabledBundles 未被写入官方核心包');
+
+// ── cleanProfileHygiene 目录卫生自愈 ──
+const fakeOfficialDir = path.join(profile, 'node_modules', '@deepseek-ai');
+await fs.mkdir(fakeOfficialDir, { recursive: true });
+pkgTb.dependencies['@deepseek-ai/dsh-storage-domain'] = '0.1.2-rc.1';
+pkgTb.dsh.profile.disabledBundles.push('@deepseek-ai/dsh-storage-domain');
+await fs.writeFile(path.join(profile, 'package.json'), JSON.stringify(pkgTb, null, 2));
+
+const hygieneRes = await cleanProfileHygiene(profile);
+assert(hygieneRes.cleaned === true, 'cleanProfileHygiene: 检测并成功自愈异常');
+assert(!fsSync.existsSync(fakeOfficialDir), 'node_modules/@deepseek-ai 残留目录已被清除');
+const pkgClean = JSON.parse(await fs.readFile(path.join(profile, 'package.json'), 'utf8'));
+assert(!pkgClean.dependencies['@deepseek-ai/dsh-storage-domain'], 'dependencies 中的官方核心包已被清理');
+assert(!pkgClean.dsh.profile.disabledBundles.includes('@deepseek-ai/dsh-storage-domain'), 'disabledBundles 中的官方核心包已被恢复');
 
 console.log(failed ? '\n有失败项' : '\n═══ 插件守卫测试全部通过 ═══');
 process.exit(failed ? 1 : 0);

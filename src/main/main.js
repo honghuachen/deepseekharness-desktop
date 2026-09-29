@@ -487,6 +487,8 @@ async function bootstrap({ isFirstBootOfApp = true } = {}) {
   }
   const dshHome = resolveDshHome();
   await ensureOfficialProfile(dshHome);
+  const { cleanProfileHygiene } = require('./plugin-guard');
+  await cleanProfileHygiene(path.join(dshHome, 'profiles', 'web'), { log: logLine });
 
   // 状态窗口与主窗口启动屏标题同时带上容器与内核版本
   if (mainWindow && !mainWindow.isDestroyed() && isSplashActive) {
@@ -770,6 +772,8 @@ async function switchKernelVersion(version, { pin = true, onLine } = {}) {
     activeVersion = version;
     recordDownloadedKernel(version);
     await updater.prune(2, [activeVersion, settings.pinnedKernelVersion].filter(Boolean));
+    const { cleanProfileHygiene } = require('./plugin-guard');
+    await cleanProfileHygiene(path.join(dshHome, 'profiles', 'web'), { log: logLine });
     const { url } = await runner.start(activeVersion, settings.port, {
       envOverride: { DSH_HOME: dshHome },
     });

@@ -153,6 +153,8 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
     // 就绪判定：进程存活且端口可连接
     const deadline = Date.now() + (isFirstBoot ? READY_TIMEOUT_FIRST_MS : READY_TIMEOUT_MS);
     let portReady = false; // 端口已就绪标志
+    let portReadyTime = 0;
+    let warnedSlowInit = false;
     while (Date.now() < deadline) {
       if (earlyExit) {
         throw new Error(`dsh web 提前退出（code=${earlyExit.code} signal=${earlyExit.signal}），详见日志`);
@@ -169,8 +171,12 @@ function createRunner({ nodeBin, paths, log = () => {} }) {
         const ok = await probePort(picked.port);
         if (ok) {
           portReady = true;
+          portReadyTime = Date.now();
           log('[runner] 端口已就绪，等待授权地址…');
         }
+      } else if (!warnedSlowInit && Date.now() - portReadyTime > 6000) {
+        warnedSlowInit = true;
+        log('[runner] 提示：等待服务初始化已超过 6 秒（可能存在超时的 MCP 服务端或插件）…');
       }
 
       // 端口就绪后等待 printedUrl，持续等待直到 deadline（stdout 可能缓冲延迟）
