@@ -34,6 +34,7 @@ const {
   checkProfileUpdates,
   isOfficial,
   parsePnpmProgressLine,
+  healBrokenDependencies,
 } = guard;
 const {
   buildInventory,
@@ -1471,6 +1472,119 @@ importers:
     const htmlContent = fs.readFileSync(path.join(__dirname, '../src/main/pages/plugins.html'), 'utf8');
     assert.match(htmlContent, /skipRestart:\s*true/, 'updateAllGlobal 遍历每个 profile 时必须带 skipRestart: true，防止中间过程重启');
     assert.match(htmlContent, /restartServiceWithToast/, '所有插件更新完成后统一调用重启');
+  });
+
+  console.log('\n插件死锁防护与远端失效自愈 (Deadlock Prevention & Self-Healing):');
+
+  await t('compareRangeToLatest: file: 依赖标记为 local', async () => {
+    assert.equal(compareRangeToLatest('file:./.local_plugins/my-dep', null), 'local');
+    assert.equal(compareRangeToLatest('link:../my-dep', '1.0.0'), 'local');
+  });
+
+  await t('checkProfileUpdates: 识别 local 依赖与 dead (404) 依赖', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'test-local-and-dead',
+      private: true,
+      dependencies: {
+        'local-plugin': 'file:./.local_plugins/local-plugin',
+        'dead-plugin': 'github:ghost-user/dead-repo',
+      },
+    }, null, 2));
+    fs.mkdirSync(path.join(dir, 'node_modules', 'local-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'local-plugin', 'package.json'), JSON.stringify({ version: '1.0.0' }));
+    fs.mkdirSync(path.join(dir, 'node_modules', 'dead-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'dead-plugin', 'package.json'), JSON.stringify({ version: '1.0.0' }));
+
+    const fakeGh = {
+      fetchLatest: async () => null,
+      fetchLatestMany: async () => new Map(),
+      isNotFound: (spec) => spec.repo === 'dead-repo',
+    };
+    const fakeReg = {
+      fetchLatestMany: async () => new Map(),
+    };
+
+    const res = await checkProfileUpdates(dir, { registry: fakeReg, githubChecker: fakeGh });
+    const localRes = res.find((r) => r.name === 'local-plugin');
+    const deadRes = res.find((r) => r.name === 'dead-plugin');
+    assert.ok(localRes, '应包含 local-plugin');
+    assert.equal(localRes.status, 'local', '本地包应标记为 local 状态');
+    assert.ok(deadRes, '应包含 dead-plugin');
+    assert.equal(deadRes.status, 'dead', '404 远端应标记为 dead 状态');
+  });
+
+  await t('healBrokenDependencies: 自动将 404 失效依赖转换为本地包解除死锁', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'test-heal',
+      private: true,
+      dependencies: {
+        'dead-pkg': 'github:author/dead-pkg',
+      },
+    }, null, 2));
+    fs.mkdirSync(path.join(dir, 'node_modules', 'dead-pkg'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'dead-pkg', 'package.json'), JSON.stringify({ name: 'dead-pkg', version: '0.1.0' }));
+
+    const errorMsg = '[ERR_PNPM_FETCH_404] GET https://codeload.github.com/author/dead-pkg/tar.gz/123: Not Found - 404';
+    const logs = [];
+    const healed = await healBrokenDependencies(dir, errorMsg, (l) => logs.push(l));
+
+    assert.equal(healed, true, '应成功自愈隔离');
+    const updatedPkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.equal(updatedPkg.dependencies['dead-pkg'], 'file:./.local_plugins/dead-pkg', '应已转为本地包引用');
+    assert.ok(fs.existsSync(path.join(dir, '.local_plugins', 'dead-pkg', 'package.json')), '本地包目录应存在完整源码');
+    assert.ok(logs.some((l) => l.includes('自愈隔离')), '应输出自愈隔离日志');
+  });
+
+  await t('updatePlugins: 旁路插件 404 导致 pnpm 报错时，自愈隔离后重试成功', async () => {
+    const dir = tmpProfile();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      name: 'test-heal-retry',
+      private: true,
+      dependencies: {
+        'good-pkg': '^1.0.0',
+        'broken-pkg': 'github:author/broken-pkg',
+      },
+    }, null, 2));
+    fs.mkdirSync(path.join(dir, 'node_modules', 'good-pkg'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'good-pkg', 'package.json'), JSON.stringify({ name: 'good-pkg', version: '1.0.0' }));
+    fs.mkdirSync(path.join(dir, 'node_modules', 'broken-pkg'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'broken-pkg', 'package.json'), JSON.stringify({ name: 'broken-pkg', version: '0.1.0' }));
+
+    const fakeNode = process.execPath;
+    const fakePnpm = path.join(dir, 'fake-pnpm.cjs');
+    // 第一次调用模拟退出码 1 (ERR_PNPM_FETCH_404)；自愈隔离后第二次调用退出码 0 并更新 good-pkg 为 1.1.0
+    const stateFile = path.join(dir, 'run-count.txt');
+    fs.writeFileSync(fakePnpm, `
+      const fs = require('fs');
+      const path = require('path');
+      const stateFile = ` + JSON.stringify(stateFile) + `;
+      const count = fs.existsSync(stateFile) ? parseInt(fs.readFileSync(stateFile, 'utf8'), 10) : 0;
+      fs.writeFileSync(stateFile, String(count + 1));
+      if (count === 0) {
+        console.error('[ERR_PNPM_FETCH_404] GET https://codeload.github.com/author/broken-pkg/tar.gz/abc: Not Found - 404');
+        process.exit(1);
+      } else {
+        const pkgPath = path.join(process.cwd(), 'node_modules', 'good-pkg', 'package.json');
+        fs.writeFileSync(pkgPath, JSON.stringify({ name: 'good-pkg', version: '1.1.0' }));
+        process.exit(0);
+      }
+    `);
+
+    const logs = [];
+    const { report, anyChanged } = await updatePlugins(dir, [{ name: 'good-pkg', target: '1.1.0' }], {
+      nodeBin: fakeNode,
+      pnpmCjs: fakePnpm,
+      log: (l) => logs.push(l),
+    });
+
+    assert.equal(report[0]?.ok, true, 'good-pkg 应升级成功');
+    assert.equal(report[0]?.to, '^1.1.0');
+    assert.equal(anyChanged, true);
+    const finalPkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+    assert.equal(finalPkg.dependencies['good-pkg'], '^1.1.0');
+    assert.equal(finalPkg.dependencies['broken-pkg'], 'file:./.local_plugins/broken-pkg', '失效依赖应已被自愈保护为本地包');
   });
 
   if (failed) {

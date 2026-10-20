@@ -637,6 +637,7 @@ function normalizeVersionTag(raw) {
 function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
   const cache = new Map(); // cacheKey -> { sha, shortSha, tag, version, isRelease, expiresAt }
   const inflight = new Map(); // cacheKey -> Promise<object|null>
+  const notFoundSet = new Set(); // 记录确认 404 (不存在/私有) 的 owner/repo 远端仓库，避免重复探测与误判
 
   /**
    * 针对 monorepo 内 `#path:` 子目录安装的插件，单独按路径查询其「最近一次真正改动」的 Commit，
@@ -772,6 +773,10 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
           signal: AbortSignal.timeout(12_000),
         });
 
+        if (res.status === 404) {
+          notFoundSet.add(`${owner}/${repo}`.toLowerCase());
+        }
+
         if (res.ok) {
           const text = await res.text();
           let headSha = null;
@@ -883,6 +888,10 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
           },
           signal: AbortSignal.timeout(12_000),
         });
+        if (res.status === 404) {
+          notFoundSet.add(`${owner}/${repo}`.toLowerCase());
+        }
+
         if (res.ok) {
           const data = await res.json();
           if (data && typeof data.sha === 'string' && /^[0-9a-f]{40}$/i.test(data.sha)) {
@@ -929,12 +938,21 @@ function createGitHubChecker({ ttlMs = 5 * 60 * 1000, log = () => {} } = {}) {
     return out;
   }
 
+  function isNotFound(spec) {
+    if (!spec) return false;
+    const owner = typeof spec === 'string' ? spec.split('/')[0] : spec.owner;
+    const repo = typeof spec === 'string' ? (spec.split('/')[1] || '').split('#')[0] : spec.repo;
+    if (!owner || !repo) return false;
+    return notFoundSet.has(`${owner}/${repo}`.toLowerCase());
+  }
+
   function clear() {
     cache.clear();
     inflight.clear();
+    notFoundSet.clear();
   }
 
-  return { fetchLatest, fetchLatestMany, clear };
+  return { fetchLatest, fetchLatestMany, isNotFound, clear };
 }
 
 /** 把 semver range（如 ^0.8.1、~1.2.0、>=2.0.0）粗略规整为可比较的字符串 */
@@ -950,11 +968,13 @@ function normalizeRange(range) {
  *   - latest 为 null（registry 失败）时也视为 unknown
  */
 function compareRangeToLatest(range, latest) {
-  if (!latest) return 'unknown';
   const r = normalizeRange(range);
   if (!r) return 'unknown';
-  // 协议型依赖：git+https、github:、file:、workspace:*、link:、portal:
-  if (/^(git\+|github:|gitlab:|bitbucket:|file:|workspace:|link:|portal:|http:|https:)/.test(r)) return 'unknown';
+  // 本地/离线协议依赖
+  if (/^(file:|link:|portal:)/.test(r)) return 'local';
+  if (!latest) return 'unknown';
+  // 协议型依赖：git+https、github:、gitlab:、bitbucket:、workspace:*、http:、https:
+  if (/^(git\+|github:|gitlab:|bitbucket:|workspace:|http:|https:)/.test(r)) return 'unknown';
   // 提取首段 semver
   const m = r.match(/(?:[\^~>=<]+\s*)?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)/);
   if (!m) return 'unknown';
@@ -978,8 +998,14 @@ async function checkProfileUpdates(profileDir, { registry, githubChecker, log = 
 
   const npmDeps = [];
   const ghDeps = [];
+  const localDeps = [];
 
   for (const d of third) {
+    const r = String(d.range || '').trim();
+    if (r.startsWith('file:') || r.startsWith('link:')) {
+      localDeps.push(d);
+      continue;
+    }
     const ghSpec = parseGitHubSpec(d.range);
     // 只有 range 本身是 GitHub 格式（github:owner/repo 或 owner/repo#ref 等）才走 GitHub 检查
     // npm 包即便其 package.json 内部 repository 指向 GitHub，也只监控 npm 版本
@@ -999,6 +1025,15 @@ async function checkProfileUpdates(profileDir, { registry, githubChecker, log = 
 
   const results = [];
 
+  for (const d of localDeps) {
+    results.push({
+      name: d.name,
+      range: d.range,
+      latest: null,
+      status: 'local',
+    });
+  }
+
   for (const d of npmDeps) {
     const latest = npmLatestMap.get(d.name) ?? null;
     results.push({
@@ -1016,11 +1051,12 @@ async function checkProfileUpdates(profileDir, { registry, githubChecker, log = 
 
     if (!remote || !installedSha) {
       const normTag = remote?.tag ? normalizeVersionTag(remote.tag) : null;
+      const isDead = Boolean(!remote && gh.isNotFound?.(spec));
       results.push({
         name: dep.name,
         range: dep.range,
         latest: remote ? (normTag ? (remote.shortSha ? `${normTag} (${remote.shortSha})` : normTag) : remote.shortSha) : null,
-        status: 'unknown',
+        status: isDead ? 'dead' : 'unknown',
         isGitHub: true,
       });
       continue;
@@ -1068,6 +1104,60 @@ async function checkProfileUpdates(profileDir, { registry, githubChecker, log = 
 }
 
 /**
+ * 尝试识别由远端 404 / 无法解析的旁路依赖导致的 pnpm 错误，
+ * 并将本地已存在的失效依赖转换为本地隔离包（file:./.local_plugins/<name>），解除更新死锁。
+ * @returns {Promise<boolean>} 是否成功隔离了至少一个失效依赖
+ */
+async function healBrokenDependencies(profileDir, errorText, log = () => {}) {
+  if (!errorText || typeof errorText !== 'string') return false;
+  const isRemoteDeadError = /ERR_PNPM_FETCH_404|ERR_PNPM_GIT_RESOLVE_FAILED|Repository not found|Failed to resolve git dependency|fatal: repository .* not found/i.test(errorText);
+  if (!isRemoteDeadError) return false;
+
+  const pkgFile = path.join(profileDir, 'package.json');
+  const pkg = readJson(pkgFile);
+  if (!pkg || !pkg.dependencies) return false;
+
+  let healedAny = false;
+  const localPluginsDir = path.join(profileDir, '.local_plugins');
+
+  for (const [depName, range] of Object.entries(pkg.dependencies)) {
+    if (isOfficial(depName)) continue;
+    if (typeof range === 'string' && range.startsWith('file:')) continue;
+
+    let matched = errorText.includes(depName);
+    if (!matched && typeof range === 'string') {
+      const ghSpec = parseGitHubSpec(range);
+      if (ghSpec && (errorText.includes(`${ghSpec.owner}/${ghSpec.repo}`) || errorText.includes(ghSpec.repo))) {
+        matched = true;
+      }
+    }
+
+    if (matched) {
+      const nmDepDir = path.join(profileDir, 'node_modules', depName);
+      if (fsSync.existsSync(nmDepDir)) {
+        try {
+          const targetLocalDir = path.join(localPluginsDir, depName);
+          await fsPromises.mkdir(localPluginsDir, { recursive: true });
+          if (!fsSync.existsSync(targetLocalDir)) {
+            await fsPromises.cp(nmDepDir, targetLocalDir, { recursive: true });
+          }
+          pkg.dependencies[depName] = `file:./.local_plugins/${depName}`;
+          log(`[guard]   🛡️ 自愈隔离：检测到依赖「${depName}」远端失效（404），已自动转换为本地包（file:./.local_plugins/${depName}）以解除更新阻断`);
+          healedAny = true;
+        } catch (copyErr) {
+          log(`[guard]   自愈隔离「${depName}」失败: ${copyErr.message}`);
+        }
+      }
+    }
+  }
+
+  if (healedAny) {
+    await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
+  }
+  return healedAny;
+}
+
+/**
  * 批量升级一个 profile 内的多个第三方依赖。
  * 步骤：备份 package.json → 为 npm 插件写新 range（若未指定或 latest 则向 registry 解析实际版本）；
  *      对 GitHub 插件保留原 range → 调用 pnpm install / pnpm update 收敛 node_modules
@@ -1107,8 +1197,18 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
       continue;
     }
 
+    if (typeof oldRange === 'string' && (oldRange.startsWith('file:') || oldRange.startsWith('link:'))) {
+      report.push({ name, ok: false, error: '本地依赖包无需且无法通过网络更新' });
+      continue;
+    }
+
     const ghSpec = parseGitHubSpec(oldRange);
     if (ghSpec) {
+      const gh = githubChecker || createGitHubChecker({ log });
+      if (gh.isNotFound?.(ghSpec)) {
+        report.push({ name, ok: false, error: '远端仓库不存在或已失效 (404)，无法更新' });
+        continue;
+      }
       const oldSha = getInstalledGitCommit(profileDir, name);
       const oldVer = readJson(path.join(profileDir, 'node_modules', name, 'package.json'))?.version;
       let targetRef = item.target || 'latest';
@@ -1118,7 +1218,6 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
 
       if (!targetRef || targetRef === 'latest') {
         try {
-          const gh = githubChecker || createGitHubChecker({ log });
           const release = await gh.fetchLatest(ghSpec);
           // 优先用 Tag（可读），没有 Tag（如 monorepo #path: 子目录安装、或仓库本身无版本 Tag）
           // 就退回到具体 Commit SHA —— 不能因为没有 Tag 就放弃更新，否则「更新到 latest」
@@ -1131,6 +1230,11 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
             targetRef = null;
           }
         } catch {}
+      }
+
+      if (gh.isNotFound?.(ghSpec)) {
+        report.push({ name, ok: false, error: '远端仓库不存在或已失效 (404)，无法更新' });
+        continue;
       }
 
       let newRange = oldRange;
@@ -1228,38 +1332,84 @@ async function updatePlugins(profileDir, items, { nodeBin, pnpmCjs, log = () => 
   try {
     // 1) 若 package.json 依赖范围发生变更或包含 npm 依赖，执行 pnpm install
     if (pkgModified || npmItems.length > 0) {
-      await runPnpm(
-        nodeBin,
-        pnpmCjs,
-        [
-          'install',
-          '--no-frozen-lockfile',
-          '--reporter=append-only',
-          '--config.dangerously-allow-all-builds=true',
-          '--config.strict-dep-builds=false',
-        ],
-        profileDir,
-        (l) => log(`[guard]   ${l}`),
-      );
+      try {
+        await runPnpm(
+          nodeBin,
+          pnpmCjs,
+          [
+            'install',
+            '--no-frozen-lockfile',
+            '--reporter=append-only',
+            '--config.dangerously-allow-all-builds=true',
+            '--config.strict-dep-builds=false',
+          ],
+          profileDir,
+          (l) => log(`[guard]   ${l}`),
+        );
+      } catch (installErr) {
+        const errorMsg = String(installErr.message || installErr);
+        const healed = await healBrokenDependencies(profileDir, errorMsg, log);
+        if (healed) {
+          log(`[guard]   ${path.basename(profileDir)}: 已自愈隔离失效依赖，重新执行安装…`);
+          await runPnpm(
+            nodeBin,
+            pnpmCjs,
+            [
+              'install',
+              '--no-frozen-lockfile',
+              '--reporter=append-only',
+              '--config.dangerously-allow-all-builds=true',
+              '--config.strict-dep-builds=false',
+            ],
+            profileDir,
+            (l) => log(`[guard]   ${l}`),
+          );
+        } else {
+          throw installErr;
+        }
+      }
     }
 
     // 2) 如果包含未改动 package.json 范围的 GitHub 依赖（如分支最新提交追踪），调用 pnpm update 强制拉取
     const ghNeedUpdate = githubItems.filter((v) => !pkgModified || v.oldRange === v.targetRange);
     if (ghNeedUpdate.length > 0) {
       const ghNames = ghNeedUpdate.map((v) => v.name);
-      await runPnpm(
-        nodeBin,
-        pnpmCjs,
-        [
-          'update',
-          ...ghNames,
-          '--reporter=append-only',
-          '--config.dangerously-allow-all-builds=true',
-          '--config.strict-dep-builds=false',
-        ],
-        profileDir,
-        (l) => log(`[guard]   ${l}`),
-      );
+      try {
+        await runPnpm(
+          nodeBin,
+          pnpmCjs,
+          [
+            'update',
+            ...ghNames,
+            '--reporter=append-only',
+            '--config.dangerously-allow-all-builds=true',
+            '--config.strict-dep-builds=false',
+          ],
+          profileDir,
+          (l) => log(`[guard]   ${l}`),
+        );
+      } catch (updateErr) {
+        const errorMsg = String(updateErr.message || updateErr);
+        const healed = await healBrokenDependencies(profileDir, errorMsg, log);
+        if (healed) {
+          log(`[guard]   ${path.basename(profileDir)}: 已自愈隔离失效依赖，重新执行 GitHub 依赖更新…`);
+          await runPnpm(
+            nodeBin,
+            pnpmCjs,
+            [
+              'update',
+              ...ghNames,
+              '--reporter=append-only',
+              '--config.dangerously-allow-all-builds=true',
+              '--config.strict-dep-builds=false',
+            ],
+            profileDir,
+            (l) => log(`[guard]   ${l}`),
+          );
+        } else {
+          throw updateErr;
+        }
+      }
     }
 
     const refreshed = readJson(pkgFile) || pkg;
@@ -1417,6 +1567,14 @@ async function removePluginsFromProfile(profileDir, names, { nodeBin, pnpmCjs, l
     }
   }
   await fsPromises.writeFile(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
+
+  // 清理本地隔离包目录
+  for (const n of want) {
+    const localDir = path.join(profileDir, '.local_plugins', n);
+    if (fsSync.existsSync(localDir)) {
+      try { await fsPromises.rm(localDir, { recursive: true, force: true }); } catch {}
+    }
+  }
 
   // 2) 补丁层：剔除 name/id 命中的插入块
   const patchFile = path.join(profileDir, 'cordis.patch.yml');
@@ -1956,6 +2114,7 @@ module.exports = {
   checkProfileUpdates,
   updatePlugin,
   updatePlugins,
+  healBrokenDependencies,
   compareRangeToLatest,
   parsePnpmProgressLine,
   CANONICAL_PKG,

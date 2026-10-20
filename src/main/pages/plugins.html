@@ -997,6 +997,12 @@ function statusTagFor(item, p) {
   if (st.status === 'current') {
     return `<span class="tag current" title="最新版本 ${esc(st.latest || '')}">已是最新</span>`;
   }
+  if (st.status === 'dead') {
+    return `<span class="tag update" style="background:#fee2e2;color:#dc2626;border-color:#fca5a5" title="远端仓库不存在或已设为私有 (404)">远端失效(404)</span>`;
+  }
+  if (st.status === 'local') {
+    return `<span class="tag" style="background:#f1f5f9;color:#64748b;border-color:#cbd5e1" title="本地离线/隔离包，无需网络更新">本地包</span>`;
+  }
   if (st.status === 'unknown') {
     return `<span class="tag unknown" title="远端不可达或依赖为本地/私有协议">未知</span>`;
   }
@@ -1012,6 +1018,7 @@ function statusTagFor(item, p) {
 function updateBtnFor(item, p) {
   const st = updateState.get(p)?.get(item.rawName || item.name);
   if (!st) return '';
+  if (st.status === 'dead' || st.status === 'local') return '';
   if (st.updating) return `<button class="btn-update" disabled>更新中… ${progressBarHtml(p, item.rawName || item.name, '')}</button>`;
   if (st.loading) return '';
   const isBusy = (typeof RESTARTING !== 'undefined' && RESTARTING) || (typeof GLOBAL_UPDATING !== 'undefined' && GLOBAL_UPDATING);
@@ -1024,6 +1031,11 @@ function updateBtnFor(item, p) {
 
 function rangeCellFor(item) {
   const raw = item.range || '';
+  if (raw.startsWith('file:') || raw.startsWith('link:')) {
+    const parts = raw.split(/[/\\]/);
+    const base = parts[parts.length - 1] || raw;
+    return `<span style="font-size:11px;opacity:0.85" title="${esc(raw)}">本地: ${esc(base)}</span>`;
+  }
   if (!item.isGitHub) {
     return esc(raw);
   }
@@ -2005,13 +2017,20 @@ function showUpdateResult(profile, res) {
 
 function showReport(report) {
   if (!report.length) return;
-  const lines = report.map((r) =>
-    r.error
-      ? `<div class="err">✗ ${esc(r.profile || '')}：${esc(r.error)}</div>`
-      : r.removed
-        ? `<div class="ok">✓ ${esc(r.profile)}：已移除 ${r.removed.length} 项</div>`
-        : `<div class="neutral">${esc(r.profile || '')}</div>`
-  );
+  const lines = report.map((r) => {
+    if (r.error) {
+      const p = r.profile ? `${r.profile} · ` : '';
+      const n = r.name ? `${r.name}：` : '';
+      return `<div class="err">✗ ${esc(p)}${esc(n)}${esc(r.error)}</div>`;
+    }
+    if (r.title) {
+      return `<div class="${r.ok ? 'ok' : 'err'}">${r.ok ? '✓' : '✗'} ${esc(r.title)}</div>`;
+    }
+    if (r.removed) {
+      return `<div class="ok">✓ ${esc(r.profile)}：已移除 ${r.removed.length} 项</div>`;
+    }
+    return `<div class="neutral">${esc(r.profile || '')}</div>`;
+  });
   const box = document.createElement('div');
   box.className = 'report card';
   box.innerHTML = lines.join('');
